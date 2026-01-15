@@ -43,7 +43,7 @@ def log_to_sheet(c_count, b_count):
 
 # === 2. 유틸리티 함수 ===
 def normalize_name(name):
-    """이름 정규화: 숫자, 괄호, 공백 제거"""
+    """이름 정규화"""
     if pd.isna(name): return ""
     name = str(name)
     name = re.sub(r'\d+', '', name)
@@ -72,39 +72,29 @@ def decrypt_file(file_obj):
         return file_obj
 
 def analyze_headers(df):
-    """데이터 시작 위치 찾기 (쿠팡/배민 구분)"""
+    """헤더 위치 탐지"""
     for i in range(len(df) - 1):
         row_curr = " ".join(df.iloc[i].astype(str).values).replace(" ", "")
         row_next = " ".join(df.iloc[i+1].astype(str).values).replace(" ", "")
         
-        # 쿠팡 (2단 헤더)
         if '총정산오더수' in row_curr and '기사부담' in row_next: return i, i+1, 'coupang'
         if '총정산오더수' in row_curr and '기사부담' in row_curr: return i, i, 'coupang'
-        # 배민
         if '라이더명' in row_curr and ('처리건수' in row_curr or 'C(A+B)' in row_curr): return i, i, 'baemin'
             
     return -1, -1, None
 
 def find_header_col(df, keywords, exclude=None, max_rows=30):
-    """
-    [강력한 헤더 찾기] 
-    상단 30줄을 전부 뒤져서 키워드(예: 수수료, 차감)가 있는 '열 번호(Column Index)'를 찾아냅니다.
-    특수문자, 띄어쓰기 무시하고 찾습니다.
-    """
-    # 키워드 전처리 (공백 제거)
+    """강력한 헤더 찾기 (공백/특수문자 무시)"""
     clean_keywords = [k.replace(" ", "") for k in keywords]
     clean_exclude = [e.replace(" ", "") for e in exclude] if exclude else []
 
     for r in range(min(len(df), max_rows)):
         for c in range(len(df.columns)):
             val = str(df.iloc[r, c]).replace(" ", "").replace("\n", "")
-            
-            # 키워드가 모두 포함되어 있는지 확인
             if all(k in val for k in clean_keywords):
-                # 제외 키워드가 없는지 확인
                 if clean_exclude and any(e in val for e in clean_exclude):
                     continue
-                return c # 찾으면 바로 열 번호 반환
+                return c
     return -1
 
 # === 3. 화면 구성 ===
@@ -156,25 +146,16 @@ if uploaded_files:
                 data_start = s_idx + 1 
 
                 if ftype == 'coupang':
-                    # [A] 쿠팡: 강력한 헤더 탐색 적용
-                    
-                    # 1. 이름 찾기
+                    # [A] 쿠팡
                     idx_nm = find_header_col(df, ['성함'])
                     if idx_nm == -1: idx_nm = 2
                     
-                    # 2. 오더수 찾기 ('총정산오더수' 우선)
                     idx_od = find_header_col(df, ['총', '정산', '오더수'])
                     if idx_od == -1: idx_od = find_header_col(df, ['오더수'])
                     
-                    # 3. ★ 핵심: 수수료 차감 금액 찾기
-                    # '수수료'와 '차감'이 동시에 들어간 칼럼을 전체 스캔해서 찾음
                     idx_net = find_header_col(df, ['수수료', '차감'])
-                    
-                    # 만약 진짜 없다면 '총 정산금액'으로 대체 (안전장치)
-                    if idx_net == -1: 
-                        idx_net = find_header_col(df, ['총', '정산금액'], exclude=['오더'])
+                    if idx_net == -1: idx_net = find_header_col(df, ['총', '정산금액'], exclude=['오더'])
 
-                    # 4. 보험료 찾기
                     idx_emp = find_header_col(df, ['기사부담', '고용보험'])
                     idx_ind = find_header_col(df, ['기사부담', '산재보험'])
                     idx_hr = find_header_col(df, ['시간제보험'])
@@ -187,7 +168,6 @@ if uploaded_files:
                         
                         od = clean_num(row[idx_od]) if idx_od != -1 else 0
                         total_c += od
-                        
                         rt = clean_num(row[idx_net]) if idx_net != -1 else 0
                         
                         ep = abs(clean_num(row[idx_emp])) if idx_emp != -1 else 0
@@ -199,19 +179,17 @@ if uploaded_files:
                         all_data[nm]['c_od']+=od; all_data[nm]['c_tot']+=rt; all_data[nm]['c_ep']+=ep; all_data[nm]['c_id']+=id_; all_data[nm]['c_hr']+=hr; all_data[nm]['c_ret']+=ret
 
                 elif ftype == 'baemin':
-                    # [B] 배민 (기존 유지)
+                    # [B] 배민
                     idx_od = find_header_col(df, ['처리건수'])
                     idx_tot = find_header_col(df, ['C(A+B)'])
-                    if idx_tot == -1: idx_tot = find_header_col(df, ['지급예정금액']) # 혹시 이름 다를 경우 대비
+                    if idx_tot == -1: idx_tot = find_header_col(df, ['지급예정금액'])
 
                     idx_ep = find_header_col(df, ['라이더부담', '고용보험'])
                     idx_id = find_header_col(df, ['라이더부담', '산재보험'])
                     idx_hr = find_header_col(df, ['시간제보험'])
                     idx_rf = find_header_col(df, ['(F)'])
                     idx_rg = find_header_col(df, ['(G)'])
-                    
-                    idx_nm = find_header_col(df, ['라이더명'])
-                    if idx_nm == -1: idx_nm = 2
+                    idx_nm = find_header_col(df, ['라이더명']); idx_nm = 2 if idx_nm == -1 else idx_nm
                     
                     for i in range(data_start, len(df)):
                         row = df.iloc[i]
@@ -220,7 +198,6 @@ if uploaded_files:
                         
                         od = clean_num(row[idx_od]) if idx_od != -1 else 0
                         total_b += od
-                        
                         rt = clean_num(row[idx_tot]) if idx_tot != -1 else 0
                         fee = od * 100
                         nt = rt - fee
@@ -252,6 +229,7 @@ if uploaded_files:
                     '쿠팡 고용보험': d['c_ep'], '쿠팡 산재보험': d['c_id'],
                     '배민 고용보험': d['b_ep'], '배민 산재보험': d['b_id'],
                     '쿠팡 시간제 보험': d['c_hr'], '배민 시간제 보험': d['b_hr'],
+                    '오배달차감': '', # [NEW] 추가 (P열)
                     '보험료 환급(소급)': t_ret,
                     '소득세': tax, '지방소득세': ltax, '선지급차감': 0, '최종지급(액)': pay
                 })
@@ -268,15 +246,24 @@ if uploaded_files:
             fmt_hide = wb.add_format({'num_format': '#,##0;-#,##0;""'})
             
             ws.set_column('A:A', 12); ws.set_column('B:E', 14, fmt_num)
-            ws.set_column('F:H', 14, fmt_hide); ws.set_column('I:R', 14, fmt_num)
-            ws.set_column('S:S', 14, fmt_hide); ws.set_column('T:T', 14, fmt_num)
-            
+            ws.set_column('F:H', 14, fmt_hide); ws.set_column('I:U', 14, fmt_num) # I~U까지 확장 적용
+
+            # 수식 적용 (한 칸씩 밀림 반영)
             for i in range(len(df_out)):
                 r = i + 2
+                # 최종합산 (I열)
                 ws.write_formula(f'I{r}', f'=D{r}+E{r}+F{r}+G{r}+H{r}', fmt_num, df_out.iloc[i]['최종합산'])
-                ws.write_formula(f'Q{r}', f'=ROUNDDOWN(I{r}*0.03, -1)', fmt_num, df_out.iloc[i]['소득세'])
-                ws.write_formula(f'R{r}', f'=ROUNDDOWN(I{r}*0.003, -1)', fmt_num, df_out.iloc[i]['지방소득세'])
-                ws.write_formula(f'T{r}', f'=I{r}-(J{r}+K{r}+L{r}+M{r}+N{r}+O{r})+P{r}-(Q{r}+R{r})-S{r}', fmt_num, df_out.iloc[i]['최종지급(액)'])
+                
+                # 소득세 (R열로 밀림)
+                ws.write_formula(f'R{r}', f'=ROUNDDOWN(I{r}*0.03, -1)', fmt_num, df_out.iloc[i]['소득세'])
+                
+                # 지방소득세 (S열로 밀림)
+                ws.write_formula(f'S{r}', f'=ROUNDDOWN(I{r}*0.003, -1)', fmt_num, df_out.iloc[i]['지방소득세'])
+                
+                # 최종지급액 (U열로 밀림) - P(오배달) 차감 추가
+                # 식: 합산(I) - 보험(J~O) - 오배달(P) + 환급(Q) - 세금(R+S) - 선지급(T)
+                formula_final = f'=I{r}-(J{r}+K{r}+L{r}+M{r}+N{r}+O{r})-P{r}+Q{r}-(R{r}+S{r})-T{r}'
+                ws.write_formula(f'U{r}', formula_final, fmt_num, df_out.iloc[i]['최종지급(액)'])
             
             writer.close()
             out.seek(0)
