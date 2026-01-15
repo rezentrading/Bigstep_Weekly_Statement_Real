@@ -3,7 +3,7 @@ import pandas as pd
 import re
 import math
 import io
-import msoffice_crypto_tool
+import msoffcrypto  # [수정] 올바른 라이브러리 이름
 
 # === 고정 비밀번호 설정 (사업자번호) ===
 FILE_PASSWORD = "2598801569"
@@ -37,25 +37,23 @@ def decrypt_file(file_obj):
     """파일이 암호화되어 있다면 해제하여 반환"""
     file_obj.seek(0)
     try:
-        # 1. 암호화된 파일인지 확인 및 해제 시도
-        office_file = msoffice_crypto_tool.OfficeFile(file_obj)
-        office_file.load_key(password=FILE_PASSWORD)
-        
+        # [수정] msoffcrypto 라이브러리 사용
         decrypted = io.BytesIO()
+        office_file = msoffcrypto.OfficeFile(file_obj)
+        office_file.load_key(password=FILE_PASSWORD)
         office_file.decrypt(decrypted)
+        
         decrypted.seek(0)
         decrypted.name = file_obj.name # 원래 파일명 유지
         return decrypted
     except Exception:
-        # 2. 암호화되지 않았거나(일반 파일), 다른 오류라면 원본 그대로 반환
+        # 암호화되지 않았거나(일반 파일), 다른 오류라면 원본 그대로 반환
         file_obj.seek(0)
         return file_obj
 
 def find_header_row(df):
     """
     데이터프레임에서 실제 헤더가 있는 행 번호를 찾는다.
-    쿠팡: '기사부담 고용보험' 또는 '성함'과 '총 정산금액'이 있는 줄
-    배민: '라이더명'과 '처리건수'가 있는 줄
     """
     for i, row in df.iterrows():
         row_str = row.astype(str).values
@@ -89,7 +87,7 @@ st.title("📊 빅스텝 통합 주차 정산서 생성기")
 st.markdown(f"### 엑셀 파일 업로드 (비밀번호 자동해제)")
 st.info(f"비밀번호(`{FILE_PASSWORD}`)가 걸린 파일도 그대로 올리시면 됩니다. (개수 무제한, 자동 분류)")
 
-# 파일 업로더 (여러 파일 허용)
+# 파일 업로더
 uploaded_files = st.file_uploader("엑셀 파일들을 이곳에 놓으세요", accept_multiple_files=True, type=['xlsx'])
 
 if uploaded_files:
@@ -98,7 +96,7 @@ if uploaded_files:
     baemin_files = []
     unknown_files = []
     
-    # 처리된 파일 객체들을 저장할 리스트 (나중에 다시 읽기 위함)
+    # 처리된 파일 객체들을 저장할 리스트
     processed_files_map = [] # (file_obj, file_type, header_idx)
 
     for f in uploaded_files:
