@@ -110,7 +110,7 @@ def analyze_headers_type(df, detected_type):
     return -1, -1, None
 
 def find_col_in_list(header_list, keywords, exclude=None):
-    """특정 리스트 안에서 키워드 찾기"""
+    """특정 리스트 안에서 키워드 찾기 (강력한 검색)"""
     clean_keywords = [k.replace(" ", "") for k in keywords]
     clean_exclude = [e.replace(" ", "") for e in exclude] if exclude else []
     
@@ -174,18 +174,29 @@ if uploaded_files:
                 h_sub = df.iloc[s_idx].astype(str).tolist()
 
                 if ftype == 'coupang':
-                    # [A] 쿠팡 로직 (총금액 찾기 강화: 윗줄/아랫줄 모두 검색)
+                    # [A] 쿠팡 로직 (총금액 찾기 최적화)
                     idx_nm = find_col_in_list(h_main, ['성함']); idx_nm = 2 if idx_nm == -1 else idx_nm
                     idx_od = find_col_in_list(h_main, ['총', '정산', '오더수'])
                     if idx_od == -1: idx_od = find_col_in_list(h_main, ['오더수'])
                     
-                    # ★ 핵심 수정: 총금액을 윗줄(h_main)과 아랫줄(h_sub) 모두에서 찾음
-                    idx_net = find_col_in_list(h_main, ['수수료', '차감'])
+                    # ★ 핵심 수정: 총금액을 4단계로 집요하게 찾음
+                    # 1순위: '⑧' + '수수료' (가장 확실)
+                    idx_net = find_col_in_list(h_main, ['⑧', '수수료'])
+                    if idx_net == -1: idx_net = find_col_in_list(h_sub, ['⑧', '수수료'])
+                    
+                    # 2순위: '수수료' + '차감'
+                    if idx_net == -1: idx_net = find_col_in_list(h_main, ['수수료', '차감'])
                     if idx_net == -1: idx_net = find_col_in_list(h_sub, ['수수료', '차감'])
+                    
+                    # 3순위: '차감' + '금액'
+                    if idx_net == -1: idx_net = find_col_in_list(h_main, ['차감', '금액'])
+                    if idx_net == -1: idx_net = find_col_in_list(h_sub, ['차감', '금액'])
+
+                    # 4순위: '총' + '정산금액' (오더수 제외) - 최후의 보루
                     if idx_net == -1: idx_net = find_col_in_list(h_main, ['총', '정산금액'], exclude=['오더'])
                     if idx_net == -1: idx_net = find_col_in_list(h_sub, ['총', '정산금액'], exclude=['오더'])
 
-                    # 보험료는 주로 아랫줄
+                    # 보험료
                     idx_emp = find_col_in_list(h_sub, ['기사부담', '고용보험'])
                     idx_ind = find_col_in_list(h_sub, ['기사부담', '산재보험'])
                     idx_hr = find_col_in_list(h_sub, ['시간제보험'])
@@ -231,8 +242,7 @@ if uploaded_files:
                     idx_hr = find_col_in_list(h_main, ['시간제', '(D)'])
                     if idx_hr == -1: idx_hr = find_col_in_list(h_main, ['시간제'])
                     
-                    # 배민 소급은 로직상 0 (사용자 입력)
-                    idx_retro = find_col_in_list(h_main, ['소급'])
+                    # 배민 소급 0 처리
                     
                     for i in range(data_start, len(df)):
                         row = df.iloc[i]
@@ -251,7 +261,7 @@ if uploaded_files:
                         hr = clean_num(row[idx_hr]) if idx_hr != -1 else 0
                         
                         if nm not in all_data: all_data[nm] = {'c_od':0,'c_tot':0,'c_ep':0,'c_id':0,'c_hr':0,'c_ret':0,'b_od':0,'b_tot':0,'b_ep':0,'b_id':0,'b_hr':0,'b_ret':0}
-                        all_data[nm]['b_od']+=od; all_data[nm]['b_tot']+=nt; all_data[nm]['b_ep']+=ep; all_data[nm]['b_id']+=id_; all_data[nm]['b_hr']+=hr; all_data[nm]['b_ret']+=0 # 소급 0
+                        all_data[nm]['b_od']+=od; all_data[nm]['b_tot']+=nt; all_data[nm]['b_ep']+=ep; all_data[nm]['b_id']+=id_; all_data[nm]['b_hr']+=hr; all_data[nm]['b_ret']+=0
 
             # 3. 엑셀 생성
             final_rows = []
@@ -272,7 +282,7 @@ if uploaded_files:
                     '배민 고용보험': d['b_ep'], '배민 산재보험': d['b_id'],
                     '쿠팡 시간제 보험': d['c_hr'], '배민 시간제 보험': d['b_hr'],
                     '오배달차감': '', 
-                    '보험료 환급(소급)': t_ret, # 쿠팡 소급만 자동입력
+                    '보험료 환급(소급)': t_ret,
                     '소득세': tax, '지방소득세': ltax, '선지급차감': 0, '최종지급(액)': 0
                 })
             
