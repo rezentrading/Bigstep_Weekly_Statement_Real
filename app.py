@@ -3,7 +3,7 @@ import pandas as pd
 import re
 import math
 import io
-import msoffcrypto  # [수정] 올바른 라이브러리 이름
+import msoffcrypto
 
 # === 고정 비밀번호 설정 (사업자번호) ===
 FILE_PASSWORD = "2598801569"
@@ -37,7 +37,6 @@ def decrypt_file(file_obj):
     """파일이 암호화되어 있다면 해제하여 반환"""
     file_obj.seek(0)
     try:
-        # [수정] msoffcrypto 라이브러리 사용
         decrypted = io.BytesIO()
         office_file = msoffcrypto.OfficeFile(file_obj)
         office_file.load_key(password=FILE_PASSWORD)
@@ -144,13 +143,19 @@ if uploaded_files:
                     header_row = df.iloc[h_idx].astype(str).tolist()
 
                     if ftype == 'coupang':
-                        # --- [A] 쿠팡 처리 ---
+                        # --- [A] 쿠팡 처리 (로직 수정됨) ---
                         idx_name = find_col_idx(header_row, '성함')
                         if idx_name == -1: idx_name = 2
                         
-                        idx_orders = find_col_idx(header_row, '오더수')
-                        idx_total_1 = find_col_idx(header_row, '총 정산금액')
-                        idx_total_2 = find_col_idx(header_row, '정산금액', exclude_keyword='총')
+                        # [수정 1] '총 정산 오더수' 찾기
+                        idx_orders = find_col_idx(header_row, '총 정산 오더수')
+                        if idx_orders == -1: 
+                            idx_orders = find_col_idx(header_row, '오더수') # 없으면 '오더수'라도 찾기
+
+                        # [수정 2] '수수료 차감 금액' 찾기 (이게 총금액이 됨)
+                        idx_net_amt = find_col_idx(header_row, '수수료 차감 금액')
+                        
+                        # 보험료 칼럼들
                         idx_emp = find_col_idx(header_row, '기사부담 고용보험')
                         idx_ind = find_col_idx(header_row, '기사부담 산재보험')
                         idx_hourly = find_col_idx(header_row, '시간제보험')
@@ -161,15 +166,19 @@ if uploaded_files:
                             name = normalize_name(row[idx_name])
                             if not name or name == 'nan': continue
                             
+                            # 오더수 추출
                             orders = clean_num(row[idx_orders]) if idx_orders != -1 else 0
                             
-                            raw_total = 0
-                            if idx_total_1 != -1: raw_total = clean_num(row[idx_total_1])
-                            if raw_total == 0 and orders > 0 and idx_total_2 != -1:
-                                raw_total = clean_num(row[idx_total_2])
-                            
-                            net_total = raw_total 
-                            
+                            # [수정] 총금액 추출 ('수수료 차감 금액' 칼럼 사용)
+                            net_total = 0
+                            if idx_net_amt != -1:
+                                net_total = clean_num(row[idx_net_amt])
+                            else:
+                                # 만약 '수수료 차감 금액' 칼럼이 없으면 기존 방식(총 정산금액) 등으로 대체
+                                idx_backup = find_col_idx(header_row, '총 정산금액')
+                                if idx_backup != -1:
+                                    net_total = clean_num(row[idx_backup])
+
                             emp = abs(clean_num(row[idx_emp])) if idx_emp != -1 else 0
                             ind = abs(clean_num(row[idx_ind])) if idx_ind != -1 else 0
                             hourly = abs(clean_num(row[idx_hourly])) if idx_hourly != -1 else 0
