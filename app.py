@@ -109,14 +109,33 @@ def analyze_headers_type(df, detected_type):
 
     return -1, -1, None
 
+def find_col_index_global(df, keywords, exclude=None, max_rows=30):
+    """
+    [핵심] 데이터프레임 상단 전체를 스캔하여 키워드가 있는 '열 번호(col index)'를 찾음
+    병합된 셀이라도 값이 있는 좌표를 찾아냄.
+    """
+    clean_keywords = [k.replace(" ", "") for k in keywords]
+    clean_exclude = [e.replace(" ", "") for e in exclude] if exclude else []
+
+    # 전체 열 스캔
+    for c in range(len(df.columns)):
+        # 상단 max_rows 행 스캔
+        for r in range(min(len(df), max_rows)):
+            val = str(df.iloc[r, c]).replace(" ", "").replace("\n", "")
+            
+            if all(k in val for k in clean_keywords):
+                if clean_exclude and any(e in val for e in clean_exclude):
+                    continue
+                return c # 찾으면 바로 열 인덱스 반환
+    return -1
+
 def find_col_in_list(header_list, keywords, exclude=None):
-    """특정 리스트 안에서 키워드 찾기 (강력한 검색)"""
+    """특정 리스트(행) 안에서 키워드 찾기"""
     clean_keywords = [k.replace(" ", "") for k in keywords]
     clean_exclude = [e.replace(" ", "") for e in exclude] if exclude else []
     
     for i, val in enumerate(header_list):
         val_str = str(val).replace(" ", "").replace("\n", "")
-        
         if all(k in val_str for k in clean_keywords):
             if clean_exclude and any(e in val_str for e in clean_exclude):
                 continue
@@ -174,24 +193,23 @@ if uploaded_files:
                 h_sub = df.iloc[s_idx].astype(str).tolist()
 
                 if ftype == 'coupang':
-                    # [A] 쿠팡 로직 (총금액 찾기 최적화)
-                    idx_nm = find_col_in_list(h_main, ['성함']); idx_nm = 2 if idx_nm == -1 else idx_nm
-                    idx_od = find_col_in_list(h_main, ['총', '정산', '오더수'])
-                    if idx_od == -1: idx_od = find_col_in_list(h_main, ['오더수'])
+                    # [A] 쿠팡 로직
+                    # 이름, 오더수 찾기
+                    idx_nm = find_col_index_global(df, ['성함']); idx_nm = 2 if idx_nm == -1 else idx_nm
+                    idx_od = find_col_index_global(df, ['총', '정산', '오더수'])
+                    if idx_od == -1: idx_od = find_col_index_global(df, ['오더수'])
                     
-                    # ★ 핵심 수정: '⑧' 같은 특수문자 빼고 '수수료', '차감' 만으로 검색 (가장 확실)
-                    idx_net = find_col_in_list(h_main, ['수수료', '차감'])
-                    if idx_net == -1: idx_net = find_col_in_list(h_sub, ['수수료', '차감'])
+                    # ★ 핵심 수정: 전체 영역 스캔으로 '수수료 차감 금액' 찾기 (병합 셀 대응)
+                    idx_net = find_col_index_global(df, ['수수료', '차감'])
                     
-                    # 그래도 없으면 '총' + '정산금액' (오더수 제외)
-                    if idx_net == -1: idx_net = find_col_in_list(h_main, ['총', '정산금액'], exclude=['오더'])
-                    if idx_net == -1: idx_net = find_col_in_list(h_sub, ['총', '정산금액'], exclude=['오더'])
+                    # 그래도 없으면 '총 정산금액' (오더수 제외)
+                    if idx_net == -1: idx_net = find_col_index_global(df, ['총', '정산금액'], exclude=['오더'])
 
                     # 보험료
-                    idx_emp = find_col_in_list(h_sub, ['기사부담', '고용보험'])
-                    idx_ind = find_col_in_list(h_sub, ['기사부담', '산재보험'])
-                    idx_hr = find_col_in_list(h_sub, ['시간제보험'])
-                    idx_ret = find_col_in_list(h_sub, ['보험료', '소급'])
+                    idx_emp = find_col_index_global(df, ['기사부담', '고용보험'])
+                    idx_ind = find_col_index_global(df, ['기사부담', '산재보험'])
+                    idx_hr = find_col_index_global(df, ['시간제보험'])
+                    idx_ret = find_col_index_global(df, ['보험료', '소급'])
                     
                     for i in range(data_start, len(df)):
                         row = df.iloc[i]
@@ -213,17 +231,22 @@ if uploaded_files:
                         all_data[nm]['c_od']+=od; all_data[nm]['c_tot']+=rt; all_data[nm]['c_ep']+=ep; all_data[nm]['c_id']+=id_; all_data[nm]['c_hr']+=hr; all_data[nm]['c_ret']+=ret
 
                 elif ftype == 'baemin':
-                    # [B] 배민 로직 (유지)
+                    # [B] 배민 로직 (헤더 줄에서만 찾기 - 오더수 오류 방지)
+                    
+                    # 1. 이름
                     idx_nm = find_col_in_list(h_main, ['라이더명'])
                     if idx_nm == -1: idx_nm = find_col_in_list(h_main, ['성명'])
                     if idx_nm == -1: idx_nm = 2
                     
+                    # 2. 오더수 (헤더 줄에서만 검색)
                     idx_od = find_col_in_list(h_main, ['처리건수'])
                     if idx_od == -1: idx_od = find_col_in_list(h_main, ['배달건수'])
 
+                    # 3. 총금액 (배달료 A)
                     idx_tot = find_col_in_list(h_main, ['배달료', 'A']) 
                     if idx_tot == -1: idx_tot = find_col_in_list(h_main, ['배달료']) 
 
+                    # 4. 보험료 (②, ④, D 필수)
                     idx_ep = find_col_in_list(h_main, ['라이더부담', '고용', '②'])
                     if idx_ep == -1: idx_ep = find_col_in_list(h_main, ['라이더부담', '고용']) 
                     
@@ -232,8 +255,6 @@ if uploaded_files:
 
                     idx_hr = find_col_in_list(h_main, ['시간제', '(D)'])
                     if idx_hr == -1: idx_hr = find_col_in_list(h_main, ['시간제'])
-                    
-                    # 배민 소급 0 처리
                     
                     for i in range(data_start, len(df)):
                         row = df.iloc[i]
