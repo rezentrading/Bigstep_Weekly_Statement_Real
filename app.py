@@ -9,7 +9,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 
 # ==========================================
-# [설정] 원장님의 구글 시트 주소
+# [설정] 구글 시트 주소
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1pKrWaGlrAZP1nJLsKFFnUlgOOasCmiKqpovA_t5k2qA/edit?gid=0#gid=0"
 # ==========================================
 
@@ -46,33 +46,15 @@ def normalize_name(name):
     """이름 정규화: 숫자, 괄호, 공백 제거"""
     if pd.isna(name): return ""
     name = str(name)
-    name = re.sub(r'\d+', '', name)  # 숫자 제거
-    name = re.sub(r'\(.*?\)', '', name) # 괄호 내용 제거
+    name = re.sub(r'\d+', '', name)
+    name = re.sub(r'\(.*?\)', '', name)
     return name.strip().replace(" ", "")
 
 def clean_num(x):
-    """숫자 변환 (콤마 제거)"""
+    """숫자 변환"""
     if pd.isna(x) or x == '': return 0
     try: return float(str(x).replace(',', ''))
     except: return 0
-
-def find_col_idx(headers, keyword, exclude_keyword=None):
-    """
-    [핵심 수정] 공백/줄바꿈을 모두 제거하고 키워드를 찾도록 개선
-    예: '⑧수수료 차감 금액' -> '수수료차감금액'으로 변환하여 검색
-    """
-    # 검색 키워드도 공백 제거
-    keyword_clean = keyword.replace(" ", "")
-    exclude_clean = exclude_keyword.replace(" ", "") if exclude_keyword else None
-    
-    for i, h in enumerate(headers):
-        # 헤더 값도 공백/줄바꿈 제거
-        h_str = str(h).replace('\n', '').replace(" ", "")
-        
-        if keyword_clean in h_str:
-            if exclude_clean and exclude_clean in h_str: continue
-            return i
-    return -1
 
 def decrypt_file(file_obj):
     """암호화된 엑셀 파일 해제"""
@@ -90,28 +72,40 @@ def decrypt_file(file_obj):
         return file_obj
 
 def analyze_headers(df):
-    """
-    헤더 구조 분석 (쿠팡 2단 헤더 vs 배민 1단 헤더)
-    [수정] 여기서도 공백 제거 후 비교하여 정확도 향상
-    """
+    """데이터 시작 위치 찾기 (쿠팡/배민 구분)"""
     for i in range(len(df) - 1):
-        # 행 전체를 하나의 문자열로 합치고 공백 제거
         row_curr = " ".join(df.iloc[i].astype(str).values).replace(" ", "")
         row_next = " ".join(df.iloc[i+1].astype(str).values).replace(" ", "")
         
-        # [Case 1] 쿠팡: 윗줄 '총정산오더수' / 아랫줄 '기사부담'
-        if '총정산오더수' in row_curr and '기사부담' in row_next:
-            return i, i+1, 'coupang'
-            
-        # [Case 2] 쿠팡 (구버전)
-        if '총정산오더수' in row_curr and '기사부담' in row_curr:
-            return i, i, 'coupang'
-            
-        # [Case 3] 배민
-        if '라이더명' in row_curr and ('처리건수' in row_curr or 'C(A+B)' in row_curr):
-            return i, i, 'baemin'
+        # 쿠팡 (2단 헤더)
+        if '총정산오더수' in row_curr and '기사부담' in row_next: return i, i+1, 'coupang'
+        if '총정산오더수' in row_curr and '기사부담' in row_curr: return i, i, 'coupang'
+        # 배민
+        if '라이더명' in row_curr and ('처리건수' in row_curr or 'C(A+B)' in row_curr): return i, i, 'baemin'
             
     return -1, -1, None
+
+def find_header_col(df, keywords, exclude=None, max_rows=30):
+    """
+    [강력한 헤더 찾기] 
+    상단 30줄을 전부 뒤져서 키워드(예: 수수료, 차감)가 있는 '열 번호(Column Index)'를 찾아냅니다.
+    특수문자, 띄어쓰기 무시하고 찾습니다.
+    """
+    # 키워드 전처리 (공백 제거)
+    clean_keywords = [k.replace(" ", "") for k in keywords]
+    clean_exclude = [e.replace(" ", "") for e in exclude] if exclude else []
+
+    for r in range(min(len(df), max_rows)):
+        for c in range(len(df.columns)):
+            val = str(df.iloc[r, c]).replace(" ", "").replace("\n", "")
+            
+            # 키워드가 모두 포함되어 있는지 확인
+            if all(k in val for k in clean_keywords):
+                # 제외 키워드가 없는지 확인
+                if clean_exclude and any(e in val for e in clean_exclude):
+                    continue
+                return c # 찾으면 바로 열 번호 반환
+    return -1
 
 # === 3. 화면 구성 ===
 st.set_page_config(page_title="빅스텝 정산 시스템", layout="wide")
@@ -119,21 +113,19 @@ st.set_page_config(page_title="빅스텝 정산 시스템", layout="wide")
 if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
 if 'processed_data' not in st.session_state: st.session_state['processed_data'] = None
 
-# [A] 로그인 화면
+# [A] 로그인
 if not st.session_state['logged_in']:
     st.title("🔒 빅스텝 정산 시스템")
-    pwd = st.text_input("접속 암호 (사업자번호)", type="password")
+    pwd = st.text_input("접속 암호", type="password")
     if st.button("로그인"):
         if pwd == LOGIN_PASSWORD:
             st.session_state['logged_in'] = True
             st.rerun()
-        else:
-            st.error("⛔ 암호가 일치하지 않습니다.")
+        else: st.error("암호가 틀렸습니다.")
     st.stop()
 
-# [B] 메인 화면
+# [B] 메인
 st.title("📊 빅스텝 통합 주차 정산서 생성기")
-st.markdown("### 1. 정산 파일 업로드")
 st.info("쿠팡, 배민 파일을 모두 드래그해서 넣어주세요. (비밀번호 자동 해제)")
 
 uploaded_files = st.file_uploader("파일 업로드", accept_multiple_files=True, type=['xlsx'], label_visibility="collapsed")
@@ -155,52 +147,38 @@ if uploaded_files:
         if not processed_files_map:
             st.error("❌ 유효한 정산 파일을 찾지 못했습니다.")
         else:
-            # 2. 데이터 처리
             all_data = {}
             total_c, total_b = 0, 0
             
             for f_obj, ftype, m_idx, s_idx in processed_files_map:
                 f_obj.seek(0)
                 df = pd.read_excel(f_obj, header=None, engine='openpyxl')
-                
-                h_main = df.iloc[m_idx].astype(str).tolist()
-                h_sub = df.iloc[s_idx].astype(str).tolist()
                 data_start = s_idx + 1 
 
                 if ftype == 'coupang':
-                    # --- [A] 쿠팡 로직 (공백 무시 검색 적용) ---
+                    # [A] 쿠팡: 강력한 헤더 탐색 적용
                     
-                    # 1. 이름
-                    idx_nm = find_col_idx(h_main, '성함')
-                    if idx_nm == -1: idx_nm = find_col_idx(h_sub, '성함')
+                    # 1. 이름 찾기
+                    idx_nm = find_header_col(df, ['성함'])
                     if idx_nm == -1: idx_nm = 2
                     
-                    # 2. 오더수 ('총 정산 오더수')
-                    idx_od = find_col_idx(h_main, '총 정산 오더수')
-                    if idx_od == -1: idx_od = find_col_idx(h_sub, '총 정산 오더수')
-                    if idx_od == -1: idx_od = find_col_idx(h_main, '오더수')
+                    # 2. 오더수 찾기 ('총정산오더수' 우선)
+                    idx_od = find_header_col(df, ['총', '정산', '오더수'])
+                    if idx_od == -1: idx_od = find_header_col(df, ['오더수'])
                     
-                    # 3. ★ 총금액 ('수수료 차감 금액' 우선)
-                    # 이제 '⑧수수료 차감 금액'도 공백 제거로 인해 '수수료차감금액'으로 인식되어 찾아집니다.
-                    idx_net = find_col_idx(h_main, '수수료 차감 금액')
-                    if idx_net == -1: idx_net = find_col_idx(h_sub, '수수료 차감 금액')
+                    # 3. ★ 핵심: 수수료 차감 금액 찾기
+                    # '수수료'와 '차감'이 동시에 들어간 칼럼을 전체 스캔해서 찾음
+                    idx_net = find_header_col(df, ['수수료', '차감'])
                     
-                    # 그래도 없으면 '총 정산금액' (백업)
-                    if idx_net == -1: idx_net = find_col_idx(h_main, '총 정산금액') 
-                    if idx_net == -1: idx_net = find_col_idx(h_sub, '총 정산금액')
+                    # 만약 진짜 없다면 '총 정산금액'으로 대체 (안전장치)
+                    if idx_net == -1: 
+                        idx_net = find_header_col(df, ['총', '정산금액'], exclude=['오더'])
 
-                    # 4. 보험료
-                    idx_emp = find_col_idx(h_sub, '기사부담 고용보험')
-                    if idx_emp == -1: idx_emp = find_col_idx(h_main, '기사부담 고용보험')
-                    
-                    idx_ind = find_col_idx(h_sub, '기사부담 산재보험')
-                    if idx_ind == -1: idx_ind = find_col_idx(h_main, '기사부담 산재보험')
-                    
-                    idx_hr = find_col_idx(h_sub, '시간제보험')
-                    if idx_hr == -1: idx_hr = find_col_idx(h_main, '시간제보험')
-                    
-                    idx_ret = find_col_idx(h_sub, '보험료 소급')
-                    if idx_ret == -1: idx_ret = find_col_idx(h_main, '보험료 소급')
+                    # 4. 보험료 찾기
+                    idx_emp = find_header_col(df, ['기사부담', '고용보험'])
+                    idx_ind = find_header_col(df, ['기사부담', '산재보험'])
+                    idx_hr = find_header_col(df, ['시간제보험'])
+                    idx_ret = find_header_col(df, ['보험료', '소급'])
                     
                     for i in range(data_start, len(df)):
                         row = df.iloc[i]
@@ -221,15 +199,19 @@ if uploaded_files:
                         all_data[nm]['c_od']+=od; all_data[nm]['c_tot']+=rt; all_data[nm]['c_ep']+=ep; all_data[nm]['c_id']+=id_; all_data[nm]['c_hr']+=hr; all_data[nm]['c_ret']+=ret
 
                 elif ftype == 'baemin':
-                    # --- [B] 배민 로직 (기존 유지) ---
-                    idx_od = find_col_idx(h_main, '처리건수')
-                    idx_tot = find_col_idx(h_main, 'C(A+B)')
-                    idx_ep = find_col_idx(h_main, '라이더부담\n고용보험료')
-                    idx_id = find_col_idx(h_main, '라이더부담\n산재보험료')
-                    idx_hr = find_col_idx(h_main, '시간제보험료')
-                    idx_rf = find_col_idx(h_main, '(F)')
-                    idx_rg = find_col_idx(h_main, '(G)')
-                    idx_nm = find_col_idx(h_main, '라이더명'); idx_nm = 2 if idx_nm == -1 else idx_nm
+                    # [B] 배민 (기존 유지)
+                    idx_od = find_header_col(df, ['처리건수'])
+                    idx_tot = find_header_col(df, ['C(A+B)'])
+                    if idx_tot == -1: idx_tot = find_header_col(df, ['지급예정금액']) # 혹시 이름 다를 경우 대비
+
+                    idx_ep = find_header_col(df, ['라이더부담', '고용보험'])
+                    idx_id = find_header_col(df, ['라이더부담', '산재보험'])
+                    idx_hr = find_header_col(df, ['시간제보험'])
+                    idx_rf = find_header_col(df, ['(F)'])
+                    idx_rg = find_header_col(df, ['(G)'])
+                    
+                    idx_nm = find_header_col(df, ['라이더명'])
+                    if idx_nm == -1: idx_nm = 2
                     
                     for i in range(data_start, len(df)):
                         row = df.iloc[i]
@@ -279,6 +261,7 @@ if uploaded_files:
             writer = pd.ExcelWriter(out, engine='xlsxwriter')
             df_out.to_excel(writer, index=False, sheet_name='정산서')
             
+            # 서식 적용
             wb = writer.book
             ws = writer.sheets['정산서']
             fmt_num = wb.add_format({'num_format': '#,##0'})
@@ -305,27 +288,18 @@ if uploaded_files:
             }
             st.rerun()
 
-# [C] 결과 확인 및 확정 화면
 if st.session_state['processed_data']:
     data = st.session_state['processed_data']
     st.markdown("---")
     st.success(f"✅ **정산서 생성 완료!** (쿠팡: {data['c_cnt']}건 / 배민: {data['b_cnt']}건)")
     
     col1, col2 = st.columns(2)
-    
     with col1:
-        st.download_button(
-            label="📥 1. 엑셀 다운로드 (단순 확인용)",
-            data=data['excel_data'],
-            file_name='빅스텝_통합_주차정산서.xlsx',
-            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            key='download_btn'
-        )
-        
+        st.download_button("📥 1. 엑셀 다운로드", data['excel_data'], '빅스텝_통합_주차정산서.xlsx')
     with col2:
-        if st.button("💸 2. 최종 확정 및 전송 (과금 기록)"):
+        if st.button("💸 2. 최종 확정 및 전송"):
             if log_to_sheet(data['c_cnt'], data['b_cnt']):
-                st.toast("✅ 구글 시트에 기록되었습니다!")
+                st.toast("✅ 구글 시트 기록 완료!")
                 st.balloons()
                 st.session_state['processed_data'] = None
                 st.rerun()
