@@ -43,7 +43,6 @@ def log_to_sheet(c_count, b_count):
 
 # === 2. 유틸리티 함수 ===
 def normalize_name(name):
-    """이름 정규화"""
     if pd.isna(name): return ""
     name = str(name)
     name = re.sub(r'\d+', '', name)
@@ -51,13 +50,11 @@ def normalize_name(name):
     return name.strip().replace(" ", "")
 
 def clean_num(x):
-    """숫자 변환"""
     if pd.isna(x) or x == '': return 0
     try: return float(str(x).replace(',', ''))
     except: return 0
 
 def decrypt_file(file_obj):
-    """암호화된 엑셀 파일 해제"""
     file_obj.seek(0)
     try:
         decrypted = io.BytesIO()
@@ -70,23 +67,6 @@ def decrypt_file(file_obj):
     except:
         file_obj.seek(0)
         return file_obj
-
-def analyze_headers(df):
-    """헤더 위치 탐지 (쿠팡/배민) - 배민은 깊게 탐색"""
-    # 탐색 범위를 30줄까지 늘림 (배민 파일 대응)
-    for i in range(min(len(df) - 1, 30)):
-        row_curr = " ".join(df.iloc[i].astype(str).values).replace(" ", "")
-        row_next = " ".join(df.iloc[i+1].astype(str).values).replace(" ", "")
-        
-        # 쿠팡 (2단 헤더)
-        if '총정산오더수' in row_curr and '기사부담' in row_next: return i, i+1, 'coupang'
-        if '총정산오더수' in row_curr and '기사부담' in row_curr: return i, i, 'coupang'
-        
-        # 배민 (키워드: 라이더명 + 처리건수 or 지급예정금액)
-        if ('라이더명' in row_curr or '성명' in row_curr) and ('처리건수' in row_curr or '지급예정금액' in row_curr): 
-            return i, i, 'baemin'
-            
-    return -1, -1, None
 
 def find_header_col(df, keywords, exclude=None, max_rows=30):
     """강력한 헤더 찾기 (공백/특수문자 무시)"""
@@ -101,6 +81,53 @@ def find_header_col(df, keywords, exclude=None, max_rows=30):
                     continue
                 return c
     return -1
+
+def get_sheet_data(file_obj):
+    """
+    [핵심 수정] 엑셀 파일에서 '을지' 시트(배민) 또는 '종합' 시트(쿠팡)를 찾아내는 함수
+    """
+    try:
+        xl = pd.ExcelFile(file_obj, engine='openpyxl')
+        sheet_names = xl.sheet_names
+        
+        # 1. 배민: '을지'가 포함된 시트 우선 탐색
+        for sheet in sheet_names:
+            if '을지' in sheet and '라이더' in sheet:
+                return xl.parse(sheet, header=None), 'baemin'
+        
+        # 2. 쿠팡: '종합' 시트 우선 탐색
+        if '종합' in sheet_names:
+            return xl.parse('종합', header=None), 'coupang'
+            
+        # 3. 없으면 첫 번째 시트 반환 (fallback)
+        return xl.parse(0, header=None), None
+    except:
+        # 엑셀 읽기 실패 시 빈 데이터프레임
+        return pd.DataFrame(), None
+
+def analyze_headers_type(df, detected_type):
+    """헤더 위치 및 타입 확정"""
+    for i in range(min(len(df) - 1, 30)):
+        row_curr = " ".join(df.iloc[i].astype(str).values).replace(" ", "")
+        row_next = " ".join(df.iloc[i+1].astype(str).values).replace(" ", "")
+        
+        # 쿠팡 (2단 헤더)
+        if '총정산오더수' in row_curr and '기사부담' in row_next: return i, i+1, 'coupang'
+        if '총정산오더수' in row_curr and '기사부담' in row_curr: return i, i, 'coupang'
+        
+        # 배민 (키워드: 라이더명, 처리건수, 배달료 등)
+        if ('라이더명' in row_curr or '성명' in row_curr) and ('처리건수' in row_curr or '배달료' in row_curr): 
+            return i, i, 'baemin'
+            
+    # 시트 이름으로 이미 배민/쿠팡이 특정되었다면, 헤더 키워드가 좀 달라도 행만 찾으면 됨
+    if detected_type == 'baemin':
+        # 배민은 보통 '라이더명'이나 '성명'이 있는 줄이 헤더
+        for i in range(min(len(df), 30)):
+            row_str = " ".join(df.iloc[i].astype(str).values)
+            if '라이더명' in row_str or '성명' in row_str:
+                return i, i, 'baemin'
+
+    return -1, -1, None
 
 # === 3. 화면 구성 ===
 st.set_page_config(page_title="빅스텝 정산 시스템", layout="wide")
@@ -133,10 +160,13 @@ if uploaded_files:
         for f in uploaded_files:
             unlocked = decrypt_file(f)
             try:
-                df_raw = pd.read_excel(unlocked, header=None, engine='openpyxl')
-                m_idx, s_idx, ftype = analyze_headers(df_raw)
-                if m_idx != -1:
-                    processed_files_map.append((unlocked, ftype, m_idx, s_idx))
+                # [수정] 시트 이름 기반으로 데이터 로드
+                df_raw, detected_type = get_sheet_data(unlocked)
+                
+                if not df_raw.empty:
+                    m_idx, s_idx, ftype = analyze_headers_type(df_raw, detected_type)
+                    if m_idx != -1:
+                        processed_files_map.append((df_raw, ftype, m_idx, s_idx))
             except: pass
         
         if not processed_files_map:
@@ -145,13 +175,14 @@ if uploaded_files:
             all_data = {}
             total_c, total_b = 0, 0
             
-            for f_obj, ftype, m_idx, s_idx in processed_files_map:
-                f_obj.seek(0)
-                df = pd.read_excel(f_obj, header=None, engine='openpyxl')
+            for df, ftype, m_idx, s_idx in processed_files_map:
                 data_start = s_idx + 1 
 
                 if ftype == 'coupang':
-                    # [A] 쿠팡 로직 (유지)
+                    # [A] 쿠팡 로직 (2단 헤더/강력 탐색 유지)
+                    h_main = df.iloc[m_idx].astype(str).tolist()
+                    h_sub = df.iloc[s_idx].astype(str).tolist()
+
                     idx_nm = find_header_col(df, ['성함']); idx_nm = 2 if idx_nm == -1 else idx_nm
                     idx_od = find_header_col(df, ['총', '정산', '오더수'])
                     if idx_od == -1: idx_od = find_header_col(df, ['오더수'])
@@ -182,34 +213,28 @@ if uploaded_files:
                         all_data[nm]['c_od']+=od; all_data[nm]['c_tot']+=rt; all_data[nm]['c_ep']+=ep; all_data[nm]['c_id']+=id_; all_data[nm]['c_hr']+=hr; all_data[nm]['c_ret']+=ret
 
                 elif ftype == 'baemin':
-                    # [B] 배민 로직 (업그레이드)
+                    # [B] 배민 로직 ('을지' 시트 기준 재설계)
                     
                     # 1. 이름 찾기
                     idx_nm = find_header_col(df, ['라이더명'])
-                    if idx_nm == -1: idx_nm = find_header_col(df, ['이름'])
+                    if idx_nm == -1: idx_nm = find_header_col(df, ['성명'])
                     if idx_nm == -1: idx_nm = 2
                     
                     # 2. 오더수 찾기
                     idx_od = find_header_col(df, ['처리건수'])
                     if idx_od == -1: idx_od = find_header_col(df, ['배달건수'])
 
-                    # 3. 총금액 찾기 ('지급예정금액' -> '차인지급액' -> 'C(A+B)')
-                    idx_tot = find_header_col(df, ['지급예정금액']) 
-                    if idx_tot == -1: idx_tot = find_header_col(df, ['차인지급액'])
-                    if idx_tot == -1: idx_tot = find_header_col(df, ['C(A+B)'])
+                    # 3. ★ 총금액 찾기 ([요청반영] '배달료 A' 기준)
+                    idx_tot = find_header_col(df, ['배달료', 'A']) 
+                    if idx_tot == -1: idx_tot = find_header_col(df, ['배달료']) # 'A' 없으면 그냥 배달료라도
 
                     # 4. 보험료 찾기
-                    idx_ep = find_header_col(df, ['고용보험']) # '라이더부담' 없을수도 있어서 광범위하게
-                    if idx_ep == -1: idx_ep = find_header_col(df, ['본인부담금', '고용'])
-                    
-                    idx_id = find_header_col(df, ['산재보험'])
-                    if idx_id == -1: idx_id = find_header_col(df, ['본인부담금', '산재'])
-                    
+                    idx_ep = find_header_col(df, ['고용보험']) 
+                    idx_id = find_header_col(df, ['산재보험']) 
                     idx_hr = find_header_col(df, ['시간제보험'])
                     
-                    # 5. 소급 찾기 ('소급' 글자 들어가면 잡기)
+                    # 5. 소급 찾기
                     idx_retro = find_header_col(df, ['소급'])
-                    # 구버전 F, G 코드도 백업으로 유지
                     idx_rf = find_header_col(df, ['(F)'])
                     idx_rg = find_header_col(df, ['(G)'])
                     
@@ -221,10 +246,10 @@ if uploaded_files:
                         od = clean_num(row[idx_od]) if idx_od != -1 else 0
                         total_b += od
                         
-                        # 총금액
+                        # [핵심] 배달료 A를 가져옴
                         raw_tot = clean_num(row[idx_tot]) if idx_tot != -1 else 0
                         
-                        # [질문하신 내용] 건당 100원 차감 로직 유지
+                        # 수수료(건당 100원) 차감 로직 유지 (원장님 정책)
                         fee = od * 100 
                         nt = raw_tot - fee
                         
@@ -237,7 +262,6 @@ if uploaded_files:
                         if idx_retro != -1:
                             ret = abs(clean_num(row[idx_retro]))
                         else:
-                            # 구버전 방식
                             ret_f = clean_num(row[idx_rf]) if idx_rf != -1 else 0
                             ret_g = clean_num(row[idx_rg]) if idx_rg != -1 else 0
                             ret = abs(ret_f + ret_g)
