@@ -3,6 +3,10 @@ import pandas as pd
 import re
 import math
 import io
+from msoffice_crypto_tool import OfficeFile
+
+# === 고정 비밀번호 설정 ===
+FILE_PASSWORD = "2598801569"
 
 # === 1. 함수 정의 ===
 def normalize_name(name):
@@ -28,6 +32,23 @@ def find_col_idx(headers, keyword, exclude_keyword=None):
                 continue
             return i
     return -1
+
+def decrypt_file(file_obj):
+    """파일이 암호화되어 있다면 해제하여 반환"""
+    file_obj.seek(0)
+    try:
+        # 암호화된 파일인지 시도
+        office_file = OfficeFile(file_obj)
+        office_file.load_key(password=FILE_PASSWORD)
+        decrypted = io.BytesIO()
+        office_file.decrypt(decrypted)
+        decrypted.seek(0)
+        decrypted.name = file_obj.name # 원래 파일명 유지
+        return decrypted
+    except:
+        # 암호화되지 않았거나 오류 발생 시 원본 반환
+        file_obj.seek(0)
+        return file_obj
 
 def classify_file(file_obj):
     """파일 내용을 읽어서 'coupang', 'baemin', 또는 None 반환"""
@@ -93,19 +114,25 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("📊 빅스텝 통합 주차 정산서 생성기")
-st.markdown("### 1. 엑셀 파일 업로드 (여러 개 가능)")
-st.info("쿠팡, 배민 파일을 개수 상관없이 모두 드래그해서 넣어주세요. 알아서 분류하고 합산합니다.")
+st.markdown(f"### 1. 엑셀 파일 업로드 (비밀번호: `{FILE_PASSWORD}` 자동해제)")
+st.info("비밀번호가 걸린 파일도 그대로 올리시면 됩니다. (개수 무제한)")
 
 # 파일 업로더 (여러 파일 허용)
 uploaded_files = st.file_uploader("엑셀 파일들을 이곳에 놓으세요", accept_multiple_files=True, type=['xlsx'])
 
 if uploaded_files:
+    # 0. 파일 전처리 (암호 해제)
+    unlocked_files = []
+    for f in uploaded_files:
+        unlocked_f = decrypt_file(f)
+        unlocked_files.append(unlocked_f)
+
     # 1. 파일 분류 단계
     coupang_files = []
     baemin_files = []
     unknown_files = []
 
-    for f in uploaded_files:
+    for f in unlocked_files:
         ftype = classify_file(f)
         f.seek(0) # 커서 초기화
         if ftype == 'coupang':
@@ -132,7 +159,6 @@ if uploaded_files:
         if st.button("🚀 정산서 통합 생성하기"):
             try:
                 # 데이터를 모을 딕셔너리 (이름을 키(Key)로 사용)
-                # 구조: {'홍길동': {'c_orders': 10, 'b_orders': 5, ...}}
                 all_data = {}
 
                 # --- [A] 쿠팡 파일들 처리 ---
@@ -311,3 +337,7 @@ if uploaded_files:
 
             except Exception as e:
                 st.error(f"오류가 발생했습니다: {e}")
+
+elif uploaded_files:
+    # 안내 메시지 (파일 올리는 중)
+    pass
