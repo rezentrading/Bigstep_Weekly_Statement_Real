@@ -70,9 +70,8 @@ def decrypt_file(file_obj):
 
 def find_header_col(df, keywords, exclude=None, max_rows=30):
     """
-    [강력한 헤더 찾기] 공백/줄바꿈/특수문자 무시하고 키워드 매칭
+    [강력한 헤더 찾기] 공백/줄바꿈 제거 후 키워드 매칭
     """
-    # 검색 키워드 전처리 (공백 제거)
     clean_keywords = [k.replace(" ", "") for k in keywords]
     clean_exclude = [e.replace(" ", "") for e in exclude] if exclude else []
 
@@ -81,26 +80,24 @@ def find_header_col(df, keywords, exclude=None, max_rows=30):
             # 셀 값 전처리 (줄바꿈, 공백 제거)
             val = str(df.iloc[r, c]).replace(" ", "").replace("\n", "")
             
-            # 모든 키워드가 포함되어 있는지 확인
             if all(k in val for k in clean_keywords):
-                # 제외 키워드가 하나라도 있으면 건너뜀
                 if clean_exclude and any(e in val for e in clean_exclude):
                     continue
                 return c
     return -1
 
 def get_sheet_data(file_obj):
-    """시트 이름으로 배민/쿠팡 구분 및 데이터 로드"""
+    """시트 이름으로 배민/쿠팡 구분"""
     try:
         xl = pd.ExcelFile(file_obj, engine='openpyxl')
         sheet_names = xl.sheet_names
         
-        # 1. 배민: '을지' 시트 (라이더 정산용)
+        # 1. 배민: '을지' 우선
         for sheet in sheet_names:
             if '을지' in sheet:
                 return xl.parse(sheet, header=None), 'baemin'
         
-        # 2. 쿠팡: '종합' 시트
+        # 2. 쿠팡: '종합' 우선
         if '종합' in sheet_names:
             return xl.parse('종합', header=None), 'coupang'
             
@@ -110,7 +107,6 @@ def get_sheet_data(file_obj):
 
 def analyze_headers_type(df, detected_type):
     """헤더 행 위치 찾기"""
-    # 배민은 헤더가 깊숙이 있을 수 있으므로 40행까지 탐색
     for i in range(min(len(df) - 1, 40)):
         row_curr = " ".join(df.iloc[i].astype(str).values).replace(" ", "")
         row_next = " ".join(df.iloc[i+1].astype(str).values).replace(" ", "")
@@ -119,11 +115,10 @@ def analyze_headers_type(df, detected_type):
         if '총정산오더수' in row_curr and '기사부담' in row_next: return i, i+1, 'coupang'
         if '총정산오더수' in row_curr and '기사부담' in row_curr: return i, i, 'coupang'
         
-        # 배민 (라이더명, 처리건수)
+        # 배민
         if ('라이더명' in row_curr or '성명' in row_curr) and ('처리건수' in row_curr or '배달료' in row_curr): 
             return i, i, 'baemin'
             
-    # 타입이 이미 정해졌다면 키워드로 강제 탐색
     if detected_type == 'baemin':
         for i in range(min(len(df), 40)):
             row_str = " ".join(df.iloc[i].astype(str).values)
@@ -180,7 +175,7 @@ if uploaded_files:
                 data_start = s_idx + 1 
 
                 if ftype == 'coupang':
-                    # [A] 쿠팡 로직 (2단 헤더, '기사부담' 필수 체크)
+                    # [A] 쿠팡 로직 (유지)
                     h_main = df.iloc[m_idx].astype(str).tolist()
                     h_sub = df.iloc[s_idx].astype(str).tolist()
 
@@ -214,38 +209,28 @@ if uploaded_files:
                         all_data[nm]['c_od']+=od; all_data[nm]['c_tot']+=rt; all_data[nm]['c_ep']+=ep; all_data[nm]['c_id']+=id_; all_data[nm]['c_hr']+=hr; all_data[nm]['c_ret']+=ret
 
                 elif ftype == 'baemin':
-                    # [B] 배민 로직 (특수문자 및 '라이더부담' 엄격 체크)
-                    
-                    # 1. 이름
+                    # [B] 배민 로직 (특수문자 필수 체크)
                     idx_nm = find_header_col(df, ['라이더명'])
                     if idx_nm == -1: idx_nm = find_header_col(df, ['성명'])
                     if idx_nm == -1: idx_nm = 2
                     
-                    # 2. 오더수
                     idx_od = find_header_col(df, ['처리건수'])
                     if idx_od == -1: idx_od = find_header_col(df, ['배달건수'])
 
-                    # 3. 총금액 (배달료 A)
                     idx_tot = find_header_col(df, ['배달료', 'A']) 
                     if idx_tot == -1: idx_tot = find_header_col(df, ['배달료']) 
 
-                    # 4. 보험료 (원장님 요청사항: ②, ④, D 필수 확인)
-                    # 고용보험: '라이더부담' AND '고용' AND '②'
+                    # ★ 보험료 엄격 체크 (②, ④, D 필수)
                     idx_ep = find_header_col(df, ['라이더부담', '고용', '②'])
-                    if idx_ep == -1: idx_ep = find_header_col(df, ['라이더부담', '고용']) # ②가 없으면 '라이더부담'이라도 확인
+                    if idx_ep == -1: idx_ep = find_header_col(df, ['라이더부담', '고용']) 
                     
-                    # 산재보험: '라이더부담' AND '산재' AND '④'
                     idx_id = find_header_col(df, ['라이더부담', '산재', '④'])
                     if idx_id == -1: idx_id = find_header_col(df, ['라이더부담', '산재'])
 
-                    # 시간제보험: '시간제' AND '(D)'
                     idx_hr = find_header_col(df, ['시간제', '(D)'])
                     if idx_hr == -1: idx_hr = find_header_col(df, ['시간제'])
                     
-                    # 5. 소급
-                    idx_retro = find_header_col(df, ['소급'])
-                    idx_rf = find_header_col(df, ['(F)'])
-                    idx_rg = find_header_col(df, ['(G)'])
+                    # 배민 소급은 아래에서 빈값 처리하므로 로직 삭제
                     
                     for i in range(data_start, len(df)):
                         row = df.iloc[i]
@@ -263,13 +248,8 @@ if uploaded_files:
                         id_ = clean_num(row[idx_id]) if idx_id != -1 else 0
                         hr = clean_num(row[idx_hr]) if idx_hr != -1 else 0
                         
-                        ret = 0
-                        if idx_retro != -1:
-                            ret = abs(clean_num(row[idx_retro]))
-                        else:
-                            ret_f = clean_num(row[idx_rf]) if idx_rf != -1 else 0
-                            ret_g = clean_num(row[idx_rg]) if idx_rg != -1 else 0
-                            ret = abs(ret_f + ret_g)
+                        # 배민 소급: 무조건 0 (나중에 빈칸 처리됨)
+                        ret = 0 
                         
                         if nm not in all_data: all_data[nm] = {'c_od':0,'c_tot':0,'c_ep':0,'c_id':0,'c_hr':0,'c_ret':0,'b_od':0,'b_tot':0,'b_ep':0,'b_id':0,'b_hr':0,'b_ret':0}
                         all_data[nm]['b_od']+=od; all_data[nm]['b_tot']+=nt; all_data[nm]['b_ep']+=ep; all_data[nm]['b_id']+=id_; all_data[nm]['b_hr']+=hr; all_data[nm]['b_ret']+=ret
@@ -281,10 +261,12 @@ if uploaded_files:
                 f_sum = d['c_tot'] + d['b_tot']
                 tax = math.floor(f_sum * 0.03 / 10) * 10
                 ltax = math.floor(f_sum * 0.003 / 10) * 10
-                t_ret = d['c_ret'] + d['b_ret']
+                t_ret = d['c_ret'] # 배민 소급은 제외(0)
                 ins = d['c_ep']+d['b_ep']+d['c_id']+d['b_id']+d['c_hr']+d['b_hr']
-                pay = f_sum - ins + t_ret - tax - ltax
                 
+                # 최종지급액 수식용 변수 (값으로는 계산 안 함, 엑셀 수식에 맡김)
+                pay = 0
+
                 final_rows.append({
                     '성함': nm, '쿠팡 오더수': d['c_od'], '배민 오더수': d['b_od'],
                     '쿠팡 총금액': d['c_tot'], '배민 총금액': d['b_tot'],
@@ -294,8 +276,8 @@ if uploaded_files:
                     '배민 고용보험': d['b_ep'], '배민 산재보험': d['b_id'],
                     '쿠팡 시간제 보험': d['c_hr'], '배민 시간제 보험': d['b_hr'],
                     '오배달차감': '', 
-                    '보험료 환급(소급)': t_ret,
-                    '소득세': tax, '지방소득세': ltax, '선지급차감': 0, '최종지급(액)': pay
+                    '보험료 환급(소급)': '', # [NEW] 공란 처리
+                    '소득세': tax, '지방소득세': ltax, '선지급차감': 0, '최종지급(액)': 0
                 })
             
             df_out = pd.DataFrame(final_rows)
@@ -316,8 +298,11 @@ if uploaded_files:
                 ws.write_formula(f'I{r}', f'=D{r}+E{r}+F{r}+G{r}+H{r}', fmt_num, df_out.iloc[i]['최종합산'])
                 ws.write_formula(f'R{r}', f'=ROUNDDOWN(I{r}*0.03, -1)', fmt_num, df_out.iloc[i]['소득세'])
                 ws.write_formula(f'S{r}', f'=ROUNDDOWN(I{r}*0.003, -1)', fmt_num, df_out.iloc[i]['지방소득세'])
+                
+                # [수식 수정] 환급(Q)이 이제 공란이므로, 고객이 입력하면 +Q 되도록 설정
+                # P(오배달): 차감, Q(환급): 더함
                 formula_final = f'=I{r}-(J{r}+K{r}+L{r}+M{r}+N{r}+O{r})-P{r}+Q{r}-(R{r}+S{r})-T{r}'
-                ws.write_formula(f'U{r}', formula_final, fmt_num, df_out.iloc[i]['최종지급(액)'])
+                ws.write_formula(f'U{r}', formula_final, fmt_num)
             
             writer.close()
             out.seek(0)
