@@ -13,7 +13,7 @@ from datetime import datetime
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1pKrWaGlrAZP1nJLsKFFnUlgOOasCmiKqpovA_t5k2qA/edit?gid=0#gid=0"
 # ==========================================
 
-# 고정 설정 (파일 및 로그인 비밀번호)
+# 고정 설정
 FILE_PASSWORD = "2598801569"
 LOGIN_PASSWORD = "2598801569"
 
@@ -21,15 +21,11 @@ LOGIN_PASSWORD = "2598801569"
 def log_to_sheet(c_count, b_count):
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        # Streamlit Secrets에서 키 가져오기
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
-        
-        # 시트 열기
         sheet = client.open_by_url(SHEET_URL).sheet1
         
-        # 데이터 기록 (날짜, 시간, 작업자, 쿠팡건수, 배민건수, 예상수익)
         now = datetime.now()
         total_income = (c_count + b_count) * 10
         sheet.append_row([
@@ -47,25 +43,34 @@ def log_to_sheet(c_count, b_count):
 
 # === 2. 유틸리티 함수 ===
 def normalize_name(name):
-    """이름 정규화: 숫자 제거, 공백 제거"""
+    """이름 정규화: 숫자, 괄호, 공백 제거"""
     if pd.isna(name): return ""
     name = str(name)
     name = re.sub(r'\d+', '', name)  # 숫자 제거
-    name = re.sub(r'\(.*?\)', '', name) # 괄호 제거
+    name = re.sub(r'\(.*?\)', '', name) # 괄호 내용 제거
     return name.strip().replace(" ", "")
 
 def clean_num(x):
-    """숫자 변환"""
+    """숫자 변환 (콤마 제거)"""
     if pd.isna(x) or x == '': return 0
     try: return float(str(x).replace(',', ''))
     except: return 0
 
 def find_col_idx(headers, keyword, exclude_keyword=None):
-    """특정 키워드가 포함된 칼럼의 인덱스 찾기"""
+    """
+    [핵심 수정] 공백/줄바꿈을 모두 제거하고 키워드를 찾도록 개선
+    예: '⑧수수료 차감 금액' -> '수수료차감금액'으로 변환하여 검색
+    """
+    # 검색 키워드도 공백 제거
+    keyword_clean = keyword.replace(" ", "")
+    exclude_clean = exclude_keyword.replace(" ", "") if exclude_keyword else None
+    
     for i, h in enumerate(headers):
-        h_str = str(h).replace('\n', '')
-        if keyword in h_str:
-            if exclude_keyword and exclude_keyword in h_str: continue
+        # 헤더 값도 공백/줄바꿈 제거
+        h_str = str(h).replace('\n', '').replace(" ", "")
+        
+        if keyword_clean in h_str:
+            if exclude_clean and exclude_clean in h_str: continue
             return i
     return -1
 
@@ -85,17 +90,21 @@ def decrypt_file(file_obj):
         return file_obj
 
 def analyze_headers(df):
-    """헤더 위치 자동 탐지 (2단 헤더 대응)"""
+    """
+    헤더 구조 분석 (쿠팡 2단 헤더 vs 배민 1단 헤더)
+    [수정] 여기서도 공백 제거 후 비교하여 정확도 향상
+    """
     for i in range(len(df) - 1):
-        row_curr = " ".join(df.iloc[i].astype(str).values)
-        row_next = " ".join(df.iloc[i+1].astype(str).values)
+        # 행 전체를 하나의 문자열로 합치고 공백 제거
+        row_curr = " ".join(df.iloc[i].astype(str).values).replace(" ", "")
+        row_next = " ".join(df.iloc[i+1].astype(str).values).replace(" ", "")
         
-        # [Case 1] 쿠팡: 윗줄 '총 정산 오더수' / 아랫줄 '기사부담'
-        if '총 정산 오더수' in row_curr and '기사부담' in row_next:
+        # [Case 1] 쿠팡: 윗줄 '총정산오더수' / 아랫줄 '기사부담'
+        if '총정산오더수' in row_curr and '기사부담' in row_next:
             return i, i+1, 'coupang'
             
         # [Case 2] 쿠팡 (구버전)
-        if '총 정산 오더수' in row_curr and '기사부담' in row_curr:
+        if '총정산오더수' in row_curr and '기사부담' in row_curr:
             return i, i, 'coupang'
             
         # [Case 3] 배민
@@ -138,7 +147,6 @@ if uploaded_files:
             unlocked = decrypt_file(f)
             try:
                 df_raw = pd.read_excel(unlocked, header=None, engine='openpyxl')
-                # 2단 헤더 분석
                 m_idx, s_idx, ftype = analyze_headers(df_raw)
                 if m_idx != -1:
                     processed_files_map.append((unlocked, ftype, m_idx, s_idx))
@@ -155,34 +163,33 @@ if uploaded_files:
                 f_obj.seek(0)
                 df = pd.read_excel(f_obj, header=None, engine='openpyxl')
                 
-                # 헤더 추출 (메인/서브)
                 h_main = df.iloc[m_idx].astype(str).tolist()
                 h_sub = df.iloc[s_idx].astype(str).tolist()
-                data_start = s_idx + 1 # 데이터는 아랫줄 다음부터 시작
+                data_start = s_idx + 1 
 
                 if ftype == 'coupang':
-                    # --- [A] 쿠팡 로직 (수정됨) ---
+                    # --- [A] 쿠팡 로직 (공백 무시 검색 적용) ---
                     
-                    # 1. 이름 (윗줄우선)
+                    # 1. 이름
                     idx_nm = find_col_idx(h_main, '성함')
                     if idx_nm == -1: idx_nm = find_col_idx(h_sub, '성함')
                     if idx_nm == -1: idx_nm = 2
                     
-                    # 2. 오더수 (윗줄우선 - '총 정산 오더수')
+                    # 2. 오더수 ('총 정산 오더수')
                     idx_od = find_col_idx(h_main, '총 정산 오더수')
                     if idx_od == -1: idx_od = find_col_idx(h_sub, '총 정산 오더수')
                     if idx_od == -1: idx_od = find_col_idx(h_main, '오더수')
                     
-                    # 3. ★ [요청반영] 총금액 ('수수료 차감 금액' 우선 찾기)
-                    # 원장님 요청: '⑧수수료 차감 금액' (AM15~AM16 통합셀)
+                    # 3. ★ 총금액 ('수수료 차감 금액' 우선)
+                    # 이제 '⑧수수료 차감 금액'도 공백 제거로 인해 '수수료차감금액'으로 인식되어 찾아집니다.
                     idx_net = find_col_idx(h_main, '수수료 차감 금액')
                     if idx_net == -1: idx_net = find_col_idx(h_sub, '수수료 차감 금액')
                     
-                    # 혹시 못 찾으면 기존 방식(총 정산금액)으로 백업
+                    # 그래도 없으면 '총 정산금액' (백업)
                     if idx_net == -1: idx_net = find_col_idx(h_main, '총 정산금액') 
                     if idx_net == -1: idx_net = find_col_idx(h_sub, '총 정산금액')
 
-                    # 4. 보험료 (아랫줄 우선)
+                    # 4. 보험료
                     idx_emp = find_col_idx(h_sub, '기사부담 고용보험')
                     if idx_emp == -1: idx_emp = find_col_idx(h_main, '기사부담 고용보험')
                     
@@ -198,13 +205,11 @@ if uploaded_files:
                     for i in range(data_start, len(df)):
                         row = df.iloc[i]
                         nm = normalize_name(row[idx_nm])
-                        # 이름이 없거나(합계 등) 정규화 후 빈 값은 패스
                         if not nm or nm == 'nan': continue
                         
                         od = clean_num(row[idx_od]) if idx_od != -1 else 0
                         total_c += od
                         
-                        # 총금액 (수수료 차감 금액 사용)
                         rt = clean_num(row[idx_net]) if idx_net != -1 else 0
                         
                         ep = abs(clean_num(row[idx_emp])) if idx_emp != -1 else 0
@@ -274,7 +279,6 @@ if uploaded_files:
             writer = pd.ExcelWriter(out, engine='xlsxwriter')
             df_out.to_excel(writer, index=False, sheet_name='정산서')
             
-            # 서식 및 수식 적용
             wb = writer.book
             ws = writer.sheets['정산서']
             fmt_num = wb.add_format({'num_format': '#,##0'})
@@ -294,7 +298,6 @@ if uploaded_files:
             writer.close()
             out.seek(0)
 
-            # 세션 저장
             st.session_state['processed_data'] = {
                 'excel_data': out.getvalue(),
                 'c_cnt': total_c,
