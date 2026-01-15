@@ -179,20 +179,11 @@ if uploaded_files:
                     idx_od = find_col_in_list(h_main, ['총', '정산', '오더수'])
                     if idx_od == -1: idx_od = find_col_in_list(h_main, ['오더수'])
                     
-                    # ★ 핵심 수정: 총금액을 4단계로 집요하게 찾음
-                    # 1순위: '⑧' + '수수료' (가장 확실)
-                    idx_net = find_col_in_list(h_main, ['⑧', '수수료'])
-                    if idx_net == -1: idx_net = find_col_in_list(h_sub, ['⑧', '수수료'])
-                    
-                    # 2순위: '수수료' + '차감'
-                    if idx_net == -1: idx_net = find_col_in_list(h_main, ['수수료', '차감'])
+                    # ★ 핵심 수정: '⑧' 같은 특수문자 빼고 '수수료', '차감' 만으로 검색 (가장 확실)
+                    idx_net = find_col_in_list(h_main, ['수수료', '차감'])
                     if idx_net == -1: idx_net = find_col_in_list(h_sub, ['수수료', '차감'])
                     
-                    # 3순위: '차감' + '금액'
-                    if idx_net == -1: idx_net = find_col_in_list(h_main, ['차감', '금액'])
-                    if idx_net == -1: idx_net = find_col_in_list(h_sub, ['차감', '금액'])
-
-                    # 4순위: '총' + '정산금액' (오더수 제외) - 최후의 보루
+                    # 그래도 없으면 '총' + '정산금액' (오더수 제외)
                     if idx_net == -1: idx_net = find_col_in_list(h_main, ['총', '정산금액'], exclude=['오더'])
                     if idx_net == -1: idx_net = find_col_in_list(h_sub, ['총', '정산금액'], exclude=['오더'])
 
