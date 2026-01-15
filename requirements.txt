@@ -3,3 +3,5 @@ pandas
 openpyxl
 xlsxwriter
 msoffcrypto-tool
+gspread
+oauth2client
