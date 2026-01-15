@@ -9,11 +9,11 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 
 # ==========================================
-# [설정] 구글 시트 주소 (따옴표 안에 주소 넣으세요)
-SHEET_URL = "여기에_구글시트_주소를_붙여넣으세요"
+# [설정] 원장님의 구글 시트 주소
+SHEET_URL = "https://docs.google.com/spreadsheets/d/1pKrWaGlrAZP1nJLsKFFnUlgOOasCmiKqpovA_t5k2qA/edit?gid=0#gid=0"
 # ==========================================
 
-# 고정 설정
+# 고정 설정 (파일 및 로그인 비밀번호)
 FILE_PASSWORD = "2598801569"
 LOGIN_PASSWORD = "2598801569"
 
@@ -21,16 +21,25 @@ LOGIN_PASSWORD = "2598801569"
 def log_to_sheet(c_count, b_count):
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        # Secrets에서 키 가져오기
+        # Streamlit Secrets에서 키 가져오기
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
         
+        # 시트 열기
         sheet = client.open_by_url(SHEET_URL).sheet1
         
+        # 데이터 기록 (날짜, 시간, 작업자, 쿠팡건수, 배민건수, 예상수익)
         now = datetime.now()
         total_income = (c_count + b_count) * 10
-        sheet.append_row([now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"), "지인(사용자)", c_count, b_count, total_income])
+        sheet.append_row([
+            now.strftime("%Y-%m-%d"), 
+            now.strftime("%H:%M:%S"), 
+            "지인(사용자)", 
+            c_count, 
+            b_count, 
+            total_income
+        ])
         return True
     except Exception as e:
         st.error(f"⚠️ 구글 시트 기록 실패: {e}")
@@ -55,6 +64,7 @@ def find_col_idx(headers, keyword, exclude_keyword=None):
     return -1
 
 def decrypt_file(file_obj):
+    """암호화된 엑셀 파일 해제"""
     file_obj.seek(0)
     try:
         decrypted = io.BytesIO()
@@ -65,13 +75,14 @@ def decrypt_file(file_obj):
         decrypted.name = file_obj.name
         return decrypted
     except:
+        # 암호가 없거나 다른 오류면 원본 반환
         file_obj.seek(0)
         return file_obj
 
 def analyze_headers(df):
     """
-    [핵심] 쿠팡(2단 헤더) vs 배민(1단 헤더) 구분 로직
-    반환값: main_idx(윗줄), sub_idx(아랫줄), file_type
+    헤더 구조 분석 (쿠팡 2단 헤더 vs 배민 1단 헤더)
+    Returns: main_idx, sub_idx, file_type
     """
     for i in range(len(df) - 1):
         row_curr = " ".join(df.iloc[i].astype(str).values)
@@ -125,7 +136,7 @@ if uploaded_files:
             unlocked = decrypt_file(f)
             try:
                 df_raw = pd.read_excel(unlocked, header=None, engine='openpyxl')
-                # 2단 헤더 분석 사용
+                # 2단 헤더 분석
                 m_idx, s_idx, ftype = analyze_headers(df_raw)
                 if m_idx != -1:
                     processed_files_map.append((unlocked, ftype, m_idx, s_idx))
@@ -148,19 +159,20 @@ if uploaded_files:
                 data_start = s_idx + 1 # 데이터는 아랫줄 다음부터 시작
 
                 if ftype == 'coupang':
-                    # --- [A] 쿠팡 로직 (수정됨) ---
-                    # 1. 이름, 오더수, 총금액 -> 윗줄(Main)에서
+                    # --- [A] 쿠팡 로직 (2단 헤더 적용) ---
+                    
+                    # 1. 이름, 오더수, 총금액 -> 윗줄(Main)에서 찾기
                     idx_nm = find_col_idx(h_main, '성함')
                     if idx_nm == -1: idx_nm = 2
                     
                     idx_od = find_col_idx(h_main, '총 정산 오더수')
                     if idx_od == -1: idx_od = find_col_idx(h_main, '오더수')
                     
-                    # ★ 수수료 차감 금액 (없으면 총 정산금액)
+                    # ★ 핵심: '수수료 차감 금액' 찾기 (없으면 총 정산금액)
                     idx_net = find_col_idx(h_main, '수수료 차감 금액')
                     if idx_net == -1: idx_net = find_col_idx(h_main, '총 정산금액')
 
-                    # 2. 보험료 -> 아랫줄(Sub)에서
+                    # 2. 보험료 -> 아랫줄(Sub)에서 찾기
                     idx_emp = find_col_idx(h_sub, '기사부담 고용보험')
                     idx_ind = find_col_idx(h_sub, '기사부담 산재보험')
                     idx_hr = find_col_idx(h_sub, '시간제보험')
@@ -174,7 +186,7 @@ if uploaded_files:
                         od = clean_num(row[idx_od]) if idx_od != -1 else 0
                         total_c += od
                         
-                        # 총금액 (수수료 차감 금액)
+                        # 총금액 (수수료 차감 금액 우선 사용)
                         rt = clean_num(row[idx_net]) if idx_net != -1 else 0
                         
                         ep = abs(clean_num(row[idx_emp])) if idx_emp != -1 else 0
@@ -293,11 +305,8 @@ if st.session_state['processed_data']:
         
     with col2:
         if st.button("💸 2. 최종 확정 및 전송 (과금 기록)"):
-            if SHEET_URL == "여기에_구글시트_주소를_붙여넣으세요":
-                st.error("🚨 구글 시트 주소가 설정되지 않았습니다.")
-            else:
-                if log_to_sheet(data['c_cnt'], data['b_cnt']):
-                    st.toast("✅ 구글 시트에 기록되었습니다!")
-                    st.balloons()
-                    st.session_state['processed_data'] = None
-                    st.rerun()
+            if log_to_sheet(data['c_cnt'], data['b_cnt']):
+                st.toast("✅ 구글 시트에 기록되었습니다!")
+                st.balloons()
+                st.session_state['processed_data'] = None
+                st.rerun()
