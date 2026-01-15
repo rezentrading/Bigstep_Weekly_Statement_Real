@@ -69,60 +69,63 @@ def decrypt_file(file_obj):
         return file_obj
 
 def find_header_col(df, keywords, exclude=None, max_rows=30):
-    """강력한 헤더 찾기 (공백/특수문자 무시)"""
+    """
+    [강력한 헤더 찾기] 공백/줄바꿈/특수문자 무시하고 키워드 매칭
+    """
+    # 검색 키워드 전처리 (공백 제거)
     clean_keywords = [k.replace(" ", "") for k in keywords]
     clean_exclude = [e.replace(" ", "") for e in exclude] if exclude else []
 
     for r in range(min(len(df), max_rows)):
         for c in range(len(df.columns)):
+            # 셀 값 전처리 (줄바꿈, 공백 제거)
             val = str(df.iloc[r, c]).replace(" ", "").replace("\n", "")
+            
+            # 모든 키워드가 포함되어 있는지 확인
             if all(k in val for k in clean_keywords):
+                # 제외 키워드가 하나라도 있으면 건너뜀
                 if clean_exclude and any(e in val for e in clean_exclude):
                     continue
                 return c
     return -1
 
 def get_sheet_data(file_obj):
-    """
-    [핵심 수정] 엑셀 파일에서 '을지' 시트(배민) 또는 '종합' 시트(쿠팡)를 찾아내는 함수
-    """
+    """시트 이름으로 배민/쿠팡 구분 및 데이터 로드"""
     try:
         xl = pd.ExcelFile(file_obj, engine='openpyxl')
         sheet_names = xl.sheet_names
         
-        # 1. 배민: '을지'가 포함된 시트 우선 탐색
+        # 1. 배민: '을지' 시트 (라이더 정산용)
         for sheet in sheet_names:
-            if '을지' in sheet and '라이더' in sheet:
+            if '을지' in sheet:
                 return xl.parse(sheet, header=None), 'baemin'
         
-        # 2. 쿠팡: '종합' 시트 우선 탐색
+        # 2. 쿠팡: '종합' 시트
         if '종합' in sheet_names:
             return xl.parse('종합', header=None), 'coupang'
             
-        # 3. 없으면 첫 번째 시트 반환 (fallback)
         return xl.parse(0, header=None), None
     except:
-        # 엑셀 읽기 실패 시 빈 데이터프레임
         return pd.DataFrame(), None
 
 def analyze_headers_type(df, detected_type):
-    """헤더 위치 및 타입 확정"""
-    for i in range(min(len(df) - 1, 30)):
+    """헤더 행 위치 찾기"""
+    # 배민은 헤더가 깊숙이 있을 수 있으므로 40행까지 탐색
+    for i in range(min(len(df) - 1, 40)):
         row_curr = " ".join(df.iloc[i].astype(str).values).replace(" ", "")
         row_next = " ".join(df.iloc[i+1].astype(str).values).replace(" ", "")
         
-        # 쿠팡 (2단 헤더)
+        # 쿠팡
         if '총정산오더수' in row_curr and '기사부담' in row_next: return i, i+1, 'coupang'
         if '총정산오더수' in row_curr and '기사부담' in row_curr: return i, i, 'coupang'
         
-        # 배민 (키워드: 라이더명, 처리건수, 배달료 등)
+        # 배민 (라이더명, 처리건수)
         if ('라이더명' in row_curr or '성명' in row_curr) and ('처리건수' in row_curr or '배달료' in row_curr): 
             return i, i, 'baemin'
             
-    # 시트 이름으로 이미 배민/쿠팡이 특정되었다면, 헤더 키워드가 좀 달라도 행만 찾으면 됨
+    # 타입이 이미 정해졌다면 키워드로 강제 탐색
     if detected_type == 'baemin':
-        # 배민은 보통 '라이더명'이나 '성명'이 있는 줄이 헤더
-        for i in range(min(len(df), 30)):
+        for i in range(min(len(df), 40)):
             row_str = " ".join(df.iloc[i].astype(str).values)
             if '라이더명' in row_str or '성명' in row_str:
                 return i, i, 'baemin'
@@ -160,9 +163,7 @@ if uploaded_files:
         for f in uploaded_files:
             unlocked = decrypt_file(f)
             try:
-                # [수정] 시트 이름 기반으로 데이터 로드
                 df_raw, detected_type = get_sheet_data(unlocked)
-                
                 if not df_raw.empty:
                     m_idx, s_idx, ftype = analyze_headers_type(df_raw, detected_type)
                     if m_idx != -1:
@@ -179,7 +180,7 @@ if uploaded_files:
                 data_start = s_idx + 1 
 
                 if ftype == 'coupang':
-                    # [A] 쿠팡 로직 (2단 헤더/강력 탐색 유지)
+                    # [A] 쿠팡 로직 (2단 헤더, '기사부담' 필수 체크)
                     h_main = df.iloc[m_idx].astype(str).tolist()
                     h_sub = df.iloc[s_idx].astype(str).tolist()
 
@@ -213,27 +214,35 @@ if uploaded_files:
                         all_data[nm]['c_od']+=od; all_data[nm]['c_tot']+=rt; all_data[nm]['c_ep']+=ep; all_data[nm]['c_id']+=id_; all_data[nm]['c_hr']+=hr; all_data[nm]['c_ret']+=ret
 
                 elif ftype == 'baemin':
-                    # [B] 배민 로직 ('을지' 시트 기준 재설계)
+                    # [B] 배민 로직 (특수문자 및 '라이더부담' 엄격 체크)
                     
-                    # 1. 이름 찾기
+                    # 1. 이름
                     idx_nm = find_header_col(df, ['라이더명'])
                     if idx_nm == -1: idx_nm = find_header_col(df, ['성명'])
                     if idx_nm == -1: idx_nm = 2
                     
-                    # 2. 오더수 찾기
+                    # 2. 오더수
                     idx_od = find_header_col(df, ['처리건수'])
                     if idx_od == -1: idx_od = find_header_col(df, ['배달건수'])
 
-                    # 3. ★ 총금액 찾기 ([요청반영] '배달료 A' 기준)
+                    # 3. 총금액 (배달료 A)
                     idx_tot = find_header_col(df, ['배달료', 'A']) 
-                    if idx_tot == -1: idx_tot = find_header_col(df, ['배달료']) # 'A' 없으면 그냥 배달료라도
+                    if idx_tot == -1: idx_tot = find_header_col(df, ['배달료']) 
 
-                    # 4. 보험료 찾기
-                    idx_ep = find_header_col(df, ['고용보험']) 
-                    idx_id = find_header_col(df, ['산재보험']) 
-                    idx_hr = find_header_col(df, ['시간제보험'])
+                    # 4. 보험료 (원장님 요청사항: ②, ④, D 필수 확인)
+                    # 고용보험: '라이더부담' AND '고용' AND '②'
+                    idx_ep = find_header_col(df, ['라이더부담', '고용', '②'])
+                    if idx_ep == -1: idx_ep = find_header_col(df, ['라이더부담', '고용']) # ②가 없으면 '라이더부담'이라도 확인
                     
-                    # 5. 소급 찾기
+                    # 산재보험: '라이더부담' AND '산재' AND '④'
+                    idx_id = find_header_col(df, ['라이더부담', '산재', '④'])
+                    if idx_id == -1: idx_id = find_header_col(df, ['라이더부담', '산재'])
+
+                    # 시간제보험: '시간제' AND '(D)'
+                    idx_hr = find_header_col(df, ['시간제', '(D)'])
+                    if idx_hr == -1: idx_hr = find_header_col(df, ['시간제'])
+                    
+                    # 5. 소급
                     idx_retro = find_header_col(df, ['소급'])
                     idx_rf = find_header_col(df, ['(F)'])
                     idx_rg = find_header_col(df, ['(G)'])
@@ -246,10 +255,7 @@ if uploaded_files:
                         od = clean_num(row[idx_od]) if idx_od != -1 else 0
                         total_b += od
                         
-                        # [핵심] 배달료 A를 가져옴
                         raw_tot = clean_num(row[idx_tot]) if idx_tot != -1 else 0
-                        
-                        # 수수료(건당 100원) 차감 로직 유지 (원장님 정책)
                         fee = od * 100 
                         nt = raw_tot - fee
                         
@@ -257,7 +263,6 @@ if uploaded_files:
                         id_ = clean_num(row[idx_id]) if idx_id != -1 else 0
                         hr = clean_num(row[idx_hr]) if idx_hr != -1 else 0
                         
-                        # 소급 계산
                         ret = 0
                         if idx_retro != -1:
                             ret = abs(clean_num(row[idx_retro]))
