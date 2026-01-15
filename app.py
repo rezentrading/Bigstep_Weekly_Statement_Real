@@ -3,9 +3,9 @@ import pandas as pd
 import re
 import math
 import io
-from msoffice_crypto_tool import OfficeFile
+import msoffice_crypto_tool
 
-# === 고정 비밀번호 설정 ===
+# === 고정 비밀번호 설정 (사업자번호) ===
 FILE_PASSWORD = "2598801569"
 
 # === 1. 함수 정의 ===
@@ -37,71 +37,43 @@ def decrypt_file(file_obj):
     """파일이 암호화되어 있다면 해제하여 반환"""
     file_obj.seek(0)
     try:
-        # 암호화된 파일인지 시도
-        office_file = OfficeFile(file_obj)
+        # 1. 암호화된 파일인지 확인 및 해제 시도
+        office_file = msoffice_crypto_tool.OfficeFile(file_obj)
         office_file.load_key(password=FILE_PASSWORD)
+        
         decrypted = io.BytesIO()
         office_file.decrypt(decrypted)
         decrypted.seek(0)
         decrypted.name = file_obj.name # 원래 파일명 유지
         return decrypted
-    except:
-        # 암호화되지 않았거나 오류 발생 시 원본 반환
+    except Exception:
+        # 2. 암호화되지 않았거나(일반 파일), 다른 오류라면 원본 그대로 반환
         file_obj.seek(0)
         return file_obj
 
-def classify_file(file_obj):
-    """파일 내용을 읽어서 'coupang', 'baemin', 또는 None 반환"""
-    try:
-        file_obj.seek(0)
-        df_temp = pd.read_excel(file_obj, header=None, engine='openpyxl', nrows=50)
+def find_header_row(df):
+    """
+    데이터프레임에서 실제 헤더가 있는 행 번호를 찾는다.
+    쿠팡: '기사부담 고용보험' 또는 '성함'과 '총 정산금액'이 있는 줄
+    배민: '라이더명'과 '처리건수'가 있는 줄
+    """
+    for i, row in df.iterrows():
+        row_str = row.astype(str).values
+        row_joined = " ".join(row_str)
         
-        header_row_idx = -1
-        # 헤더 키워드로 행 찾기
-        for i, row in df_temp.iterrows():
-            row_str = row.astype(str).values
-            if '기사부담 고용보험' in str(row_str) or '라이더부담\n고용보험료' in str(row_str):
-                header_row_idx = i
-                break
-        
-        if header_row_idx != -1:
-            header_list = df_temp.iloc[header_row_idx].astype(str).tolist()
-            col_idx = -1
-            # 고용보험 컬럼 위치 찾기
-            for idx, h in enumerate(header_list):
-                if '고용보험' in h and ('기사' in h or '라이더' in h):
-                    col_idx = idx
-                    break
+        # 쿠팡 헤더 특징
+        if '기사부담' in row_joined and '고용보험' in row_joined:
+            return i, 'coupang'
+        if '성함' in row_joined and '총 정산금액' in row_joined:
+            return i, 'coupang'
             
-            if col_idx != -1:
-                # 데이터 값(음수 여부) 확인
-                is_negative = False
-                for k in range(header_row_idx + 1, min(header_row_idx + 6, len(df_temp))):
-                    val = clean_num(df_temp.iloc[k, col_idx])
-                    if val < 0:
-                        is_negative = True
-                        break
-                
-                if is_negative:
-                    return 'coupang'
-                else:
-                    return 'baemin'
-            else:
-                # 헤더는 찾았는데 컬럼 특정 실패 시 시트명 확인
-                file_obj.seek(0)
-                xl = pd.ExcelFile(file_obj, engine='openpyxl')
-                if '종합' in xl.sheet_names: return 'coupang'
-                elif any('을지' in s for s in xl.sheet_names): return 'baemin'
-        else:
-            # 헤더 못 찾음 -> 시트명 확인
-            file_obj.seek(0)
-            xl = pd.ExcelFile(file_obj, engine='openpyxl')
-            if '종합' in xl.sheet_names: return 'coupang'
-            elif any('을지' in s for s in xl.sheet_names): return 'baemin'
+        # 배민 헤더 특징
+        if '라이더명' in row_joined and '처리건수' in row_joined:
+            return i, 'baemin'
+        if '라이더명' in row_joined and 'C(A+B)' in row_joined:
+            return i, 'baemin'
             
-        return None
-    except Exception:
-        return None
+    return -1, None
 
 # === 2. 스트림릿 화면 구성 ===
 st.set_page_config(page_title="빅스텝 주차 정산기", layout="wide")
@@ -109,38 +81,45 @@ st.set_page_config(page_title="빅스텝 주차 정산기", layout="wide")
 st.markdown("""
 <style>
     .main > div { padding-top: 2rem; }
-    .stButton>button { width: 100%; margin-top: 20px; background-color: #FF4B4B; color: white; }
+    .stButton>button { width: 100%; margin-top: 20px; background-color: #FF4B4B; color: white; font-size: 18px; padding: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("📊 빅스텝 통합 주차 정산서 생성기")
-st.markdown(f"### 1. 엑셀 파일 업로드 (비밀번호: `{FILE_PASSWORD}` 자동해제)")
-st.info("비밀번호가 걸린 파일도 그대로 올리시면 됩니다. (개수 무제한)")
+st.markdown(f"### 엑셀 파일 업로드 (비밀번호 자동해제)")
+st.info(f"비밀번호(`{FILE_PASSWORD}`)가 걸린 파일도 그대로 올리시면 됩니다. (개수 무제한, 자동 분류)")
 
 # 파일 업로더 (여러 파일 허용)
 uploaded_files = st.file_uploader("엑셀 파일들을 이곳에 놓으세요", accept_multiple_files=True, type=['xlsx'])
 
 if uploaded_files:
-    # 0. 파일 전처리 (암호 해제)
-    unlocked_files = []
-    for f in uploaded_files:
-        unlocked_f = decrypt_file(f)
-        unlocked_files.append(unlocked_f)
-
-    # 1. 파일 분류 단계
+    # 0. 파일 전처리 (암호 해제) 및 분류
     coupang_files = []
     baemin_files = []
     unknown_files = []
+    
+    # 처리된 파일 객체들을 저장할 리스트 (나중에 다시 읽기 위함)
+    processed_files_map = [] # (file_obj, file_type, header_idx)
 
-    for f in unlocked_files:
-        ftype = classify_file(f)
-        f.seek(0) # 커서 초기화
-        if ftype == 'coupang':
-            coupang_files.append(f)
-        elif ftype == 'baemin':
-            baemin_files.append(f)
-        else:
-            unknown_files.append(f.name)
+    for f in uploaded_files:
+        # 암호 해제 시도
+        unlocked_f = decrypt_file(f)
+        
+        # 일단 읽어서 분류
+        try:
+            df_raw = pd.read_excel(unlocked_f, header=None, engine='openpyxl')
+            header_idx, ftype = find_header_row(df_raw)
+            
+            if header_idx != -1:
+                processed_files_map.append((unlocked_f, ftype, header_idx))
+                if ftype == 'coupang':
+                    coupang_files.append(unlocked_f)
+                else:
+                    baemin_files.append(unlocked_f)
+            else:
+                unknown_files.append(f.name)
+        except Exception as e:
+            unknown_files.append(f"{f.name} (읽기 실패)")
 
     # 2. 분류 결과 표시
     col1, col2 = st.columns(2)
@@ -158,96 +137,99 @@ if uploaded_files:
     if coupang_files or baemin_files:
         if st.button("🚀 정산서 통합 생성하기"):
             try:
-                # 데이터를 모을 딕셔너리 (이름을 키(Key)로 사용)
                 all_data = {}
 
-                # --- [A] 쿠팡 파일들 처리 ---
-                for c_file in coupang_files:
-                    c_file.seek(0)
-                    df = pd.read_excel(c_file, sheet_name='종합', header=None, engine='openpyxl')
-                    header_row = df.iloc[8].astype(str).tolist()
-                    
-                    idx_name = 2
-                    idx_orders = 5
-                    idx_total_1 = find_col_idx(header_row, '총 정산금액')
-                    idx_total_2 = find_col_idx(header_row, '정산금액', exclude_keyword='총')
-                    idx_emp = find_col_idx(header_row, '기사부담 고용보험')
-                    idx_ind = find_col_idx(header_row, '기사부담 산재보험')
-                    idx_hourly = find_col_idx(header_row, '시간제보험')
-                    idx_retro = find_col_idx(header_row, '보험료 소급')
+                # 분류된 파일들을 순회하며 데이터 추출
+                for f_obj, ftype, h_idx in processed_files_map:
+                    f_obj.seek(0)
+                    df = pd.read_excel(f_obj, header=None, engine='openpyxl')
+                    header_row = df.iloc[h_idx].astype(str).tolist()
 
-                    for i in range(16, len(df)):
-                        row = df.iloc[i]
-                        name = normalize_name(row[idx_name])
-                        if not name or name == 'nan': continue
+                    if ftype == 'coupang':
+                        # --- [A] 쿠팡 처리 ---
+                        idx_name = find_col_idx(header_row, '성함')
+                        if idx_name == -1: idx_name = 2
                         
-                        # 데이터 추출
-                        orders = clean_num(row[idx_orders])
-                        raw_total = clean_num(row[idx_total_1])
-                        if raw_total == 0 and orders > 0 and idx_total_2 != -1:
-                            raw_total = clean_num(row[idx_total_2])
-                        
-                        net_total = raw_total # 수수료 차감 없음
-                        
-                        emp = abs(clean_num(row[idx_emp]))
-                        ind = abs(clean_num(row[idx_ind]))
-                        hourly = abs(clean_num(row[idx_hourly]))
-                        retro = abs(clean_num(row[idx_retro]))
+                        idx_orders = find_col_idx(header_row, '오더수')
+                        idx_total_1 = find_col_idx(header_row, '총 정산금액')
+                        idx_total_2 = find_col_idx(header_row, '정산금액', exclude_keyword='총')
+                        idx_emp = find_col_idx(header_row, '기사부담 고용보험')
+                        idx_ind = find_col_idx(header_row, '기사부담 산재보험')
+                        idx_hourly = find_col_idx(header_row, '시간제보험')
+                        idx_retro = find_col_idx(header_row, '보험료 소급')
 
-                        # 데이터 합산 (기존 데이터 있으면 더하기)
-                        if name not in all_data: 
-                            all_data[name] = {'c_orders':0, 'c_total':0, 'c_emp':0, 'c_ind':0, 'c_hourly':0, 'c_retro':0,
-                                              'b_orders':0, 'b_total':0, 'b_emp':0, 'b_ind':0, 'b_hourly':0, 'b_retro':0}
-                        
-                        all_data[name]['c_orders'] += orders
-                        all_data[name]['c_total'] += net_total
-                        all_data[name]['c_emp'] += emp
-                        all_data[name]['c_ind'] += ind
-                        all_data[name]['c_hourly'] += hourly
-                        all_data[name]['c_retro'] += retro
+                        for i in range(h_idx + 1, len(df)):
+                            row = df.iloc[i]
+                            name = normalize_name(row[idx_name])
+                            if not name or name == 'nan': continue
+                            
+                            orders = clean_num(row[idx_orders]) if idx_orders != -1 else 0
+                            
+                            raw_total = 0
+                            if idx_total_1 != -1: raw_total = clean_num(row[idx_total_1])
+                            if raw_total == 0 and orders > 0 and idx_total_2 != -1:
+                                raw_total = clean_num(row[idx_total_2])
+                            
+                            net_total = raw_total 
+                            
+                            emp = abs(clean_num(row[idx_emp])) if idx_emp != -1 else 0
+                            ind = abs(clean_num(row[idx_ind])) if idx_ind != -1 else 0
+                            hourly = abs(clean_num(row[idx_hourly])) if idx_hourly != -1 else 0
+                            retro = abs(clean_num(row[idx_retro])) if idx_retro != -1 else 0
 
-                # --- [B] 배민 파일들 처리 ---
-                for b_file in baemin_files:
-                    b_file.seek(0)
-                    df = pd.read_excel(b_file, sheet_name='을지_협력사 소속 라이더 정산 확인용', header=None, engine='openpyxl')
-                    header_row = df.iloc[17].astype(str).tolist()
-                    
-                    idx_orders = find_col_idx(header_row, '처리건수')
-                    idx_total = find_col_idx(header_row, 'C(A+B)')
-                    idx_emp = find_col_idx(header_row, '라이더부담\n고용보험료')
-                    idx_ind = find_col_idx(header_row, '라이더부담\n산재보험료')
-                    idx_hourly = find_col_idx(header_row, '시간제보험료')
-                    idx_retro_f = find_col_idx(header_row, '(F)')
-                    idx_retro_g = find_col_idx(header_row, '(G)')
+                            if name not in all_data: 
+                                all_data[name] = {'c_orders':0, 'c_total':0, 'c_emp':0, 'c_ind':0, 'c_hourly':0, 'c_retro':0,
+                                                  'b_orders':0, 'b_total':0, 'b_emp':0, 'b_ind':0, 'b_hourly':0, 'b_retro':0}
+                            
+                            all_data[name]['c_orders'] += orders
+                            all_data[name]['c_total'] += net_total
+                            all_data[name]['c_emp'] += emp
+                            all_data[name]['c_ind'] += ind
+                            all_data[name]['c_hourly'] += hourly
+                            all_data[name]['c_retro'] += retro
 
-                    for i in range(19, len(df)):
-                        row = df.iloc[i]
-                        name = normalize_name(row[2])
-                        if not name or name == 'nan': continue
+                    elif ftype == 'baemin':
+                        # --- [B] 배민 처리 ---
+                        idx_orders = find_col_idx(header_row, '처리건수')
+                        idx_total = find_col_idx(header_row, 'C(A+B)')
+                        idx_emp = find_col_idx(header_row, '라이더부담\n고용보험료')
+                        idx_ind = find_col_idx(header_row, '라이더부담\n산재보험료')
+                        idx_hourly = find_col_idx(header_row, '시간제보험료')
+                        idx_retro_f = find_col_idx(header_row, '(F)')
+                        idx_retro_g = find_col_idx(header_row, '(G)')
                         
-                        orders = clean_num(row[idx_orders])
-                        raw_total = clean_num(row[idx_total])
-                        
-                        # 배민 수수료(100원) 차감
-                        fee = orders * 100
-                        net_total = raw_total - fee
-                        
-                        emp = clean_num(row[idx_emp])
-                        ind = clean_num(row[idx_ind])
-                        hourly = clean_num(row[idx_hourly])
-                        retro = abs(clean_num(row[idx_retro_f]) + clean_num(row[idx_retro_g]))
+                        idx_name_b = find_col_idx(header_row, '라이더명')
+                        if idx_name_b == -1: idx_name_b = 2
 
-                        # 데이터 합산
-                        if name not in all_data: 
-                            all_data[name] = {'c_orders':0, 'c_total':0, 'c_emp':0, 'c_ind':0, 'c_hourly':0, 'c_retro':0,
-                                              'b_orders':0, 'b_total':0, 'b_emp':0, 'b_ind':0, 'b_hourly':0, 'b_retro':0}
+                        for i in range(h_idx + 1, len(df)):
+                            row = df.iloc[i]
+                            name = normalize_name(row[idx_name_b])
+                            if not name or name == 'nan': continue
+                            
+                            orders = clean_num(row[idx_orders]) if idx_orders != -1 else 0
+                            raw_total = clean_num(row[idx_total]) if idx_total != -1 else 0
+                            
+                            fee = orders * 100
+                            net_total = raw_total - fee
+                            
+                            emp = clean_num(row[idx_emp]) if idx_emp != -1 else 0
+                            ind = clean_num(row[idx_ind]) if idx_ind != -1 else 0
+                            hourly = clean_num(row[idx_hourly]) if idx_hourly != -1 else 0
+                            
+                            retro_f = clean_num(row[idx_retro_f]) if idx_retro_f != -1 else 0
+                            retro_g = clean_num(row[idx_retro_g]) if idx_retro_g != -1 else 0
+                            retro = abs(retro_f + retro_g)
 
-                        all_data[name]['b_orders'] += orders
-                        all_data[name]['b_total'] += net_total
-                        all_data[name]['b_emp'] += emp
-                        all_data[name]['b_ind'] += ind
-                        all_data[name]['b_hourly'] += hourly
-                        all_data[name]['b_retro'] += retro
+                            if name not in all_data: 
+                                all_data[name] = {'c_orders':0, 'c_total':0, 'c_emp':0, 'c_ind':0, 'c_hourly':0, 'c_retro':0,
+                                                  'b_orders':0, 'b_total':0, 'b_emp':0, 'b_ind':0, 'b_hourly':0, 'b_retro':0}
+
+                            all_data[name]['b_orders'] += orders
+                            all_data[name]['b_total'] += net_total
+                            all_data[name]['b_emp'] += emp
+                            all_data[name]['b_ind'] += ind
+                            all_data[name]['b_hourly'] += hourly
+                            all_data[name]['b_retro'] += retro
 
                 # === 엑셀 생성 ===
                 final_rows = []
@@ -327,11 +309,11 @@ if uploaded_files:
                 output.seek(0)
 
                 st.write("---")
-                st.success("🎉 정산서 통합 생성이 완료되었습니다!")
+                st.success(f"🎉 정산서 통합 생성이 완료되었습니다! (총 {len(final_rows)}명)")
                 st.download_button(
                     label="📥 엑셀 파일 다운로드 (Click)",
                     data=output,
-                    file_name='빅스텝_통합_주차정산서.xlsx',
+                    file_name='빅스텝_통합_주차정산서_최종.xlsx',
                     mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
                 )
 
@@ -340,4 +322,4 @@ if uploaded_files:
 
 elif uploaded_files:
     # 안내 메시지 (파일 올리는 중)
-    pass
+    st.info("파일을 분석 중입니다... 잠시만 기다려주세요.")
